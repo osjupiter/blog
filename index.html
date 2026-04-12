@@ -174,26 +174,6 @@ $ echo "$BACKUP_ERA" > /backup/last_full_era</code></pre>
 <strong>No timing coordination needed.</strong> Checkpoints run on their own schedule. Backups happen whenever. You never need to stop writes or align a checkpoint to a backup.
 </div>
 
-<h2>Visualization</h2>
-<p>Each cell represents a 32KB era block. The top map shows the <strong>dirty map</strong> (colors = which era last wrote each block). The bottom map shows the <strong>backup state</strong> (what's been captured). Step through the timeline to see how they evolve.</p>
-
-<div class="blockmap-wrap">
-  <div class="blockmap-header">
-    <span class="title">DIRTY MAP + BACKUP STATE</span>
-    <div class="blockmap-controls" id="bm-controls"></div>
-  </div>
-  <div class="blockmap-body" style="padding: 12px;">
-    <div style="font-size: 11px; color: var(--fg2); margin-bottom: 4px; font-weight: 600;">DEVICE &mdash; dm-era dirty map</div>
-    <canvas id="blockmap" class="blockmap-canvas"></canvas>
-    <div style="font-size: 11px; color: var(--fg2); margin: 12px 0 4px; font-weight: 600;">BACKUP &mdash; what's been captured</div>
-    <canvas id="backupmap" class="blockmap-canvas"></canvas>
-  </div>
-  <div id="bm-info" style="padding: 8px 12px; font-size: 12px; color: var(--fg2); border-top: 1px solid #222;">
-    Hover over blocks for details.
-  </div>
-  <div class="blockmap-legend" id="bm-legend"></div>
-</div>
-
 <h2>Verified Scenario</h2>
 
 <p>We tested this end-to-end in a QEMU VM. The timeline below shows checkpoints running at fixed intervals, with a full backup at an arbitrary point between checkpoints. Writes continue before and after the backup, including writes in the <em>same era</em> as the backup.</p>
@@ -467,6 +447,26 @@ $ lvremove -f metavg/metasnap</code></pre>
 
 <div class="callout ok">
 <strong>During this entire procedure</strong>, the dm-era device was live. We verified by writing to it between steps &mdash; no errors, no pauses.
+</div>
+
+<h2>Visualization</h2>
+<p>The scenario above, visualized. Each cell is a 32KB era block. The top map shows the <strong>dirty map</strong> (colors = which era last wrote each block). The bottom map shows the <strong>backup state</strong> (what's been captured in full/diff backups). Step through the timeline with the buttons.</p>
+
+<div class="blockmap-wrap">
+  <div class="blockmap-header">
+    <span class="title">DIRTY MAP + BACKUP STATE</span>
+    <div class="blockmap-controls" id="bm-controls"></div>
+  </div>
+  <div class="blockmap-body" style="padding: 12px;">
+    <div style="font-size: 11px; color: var(--fg2); margin-bottom: 4px; font-weight: 600;">DEVICE &mdash; dm-era dirty map</div>
+    <canvas id="blockmap" class="blockmap-canvas"></canvas>
+    <div style="font-size: 11px; color: var(--fg2); margin: 12px 0 4px; font-weight: 600;">BACKUP &mdash; what's been captured</div>
+    <canvas id="backupmap" class="blockmap-canvas"></canvas>
+  </div>
+  <div id="bm-info" style="padding: 8px 12px; font-size: 12px; color: var(--fg2); border-top: 1px solid #222;">
+    Hover over blocks for details.
+  </div>
+  <div class="blockmap-legend" id="bm-legend"></div>
 </div>
 
 <h2>Results</h2>
