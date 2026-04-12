@@ -525,6 +525,14 @@ $ md5sum /backup/reconstructed.img
 </div>
 
 
+<h2>Conclusion</h2>
+
+<p>dm-era is a simple, underutilized kernel feature that enables differential backups on any block device &mdash; without thin provisioning, without pool management, and without stopping the device. By recording a single integer (the current era) at full-backup time, you get a precise dirty block map that tells you exactly which sectors to copy next time.</p>
+
+<p>This article demonstrated the approach with a full backup followed by a single differential. The same mechanism naturally extends to <strong>incremental backups</strong>: record the era at each backup, and next time query only blocks written since that era. Multiple incremental chains, rotation schemes, and retention policies are all possible &mdash; the era counter just keeps going.</p>
+
+<p>The test was conducted in a small VM with synthetic writes. Production workloads involve larger devices, higher I/O rates, and longer era histories. The era block size (32KB in our test) affects tracking granularity and metadata size &mdash; tuning it for your workload is worth investigating. As with any backup strategy, validate your restore path end-to-end before relying on it.</p>
+
 <footer>
   Tested on Linux 6.8.0-rc3 (dm-6.8 branch) in a QEMU VM with LVM snapshots.
   Era block size: 64 sectors (32KB). Origin: 800MB. Metadata: 32MB.
