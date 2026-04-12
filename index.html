@@ -303,52 +303,173 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
   <div class="blockmap-legend" id="bm-legend"></div>
 </div>
 
-<h2>The Differential Backup Procedure</h2>
+<h2>Experiment: Full Walkthrough</h2>
 
-<h3>Setup (one-time)</h3>
-<pre><code># Metadata device (separate VG for independent snapshots)
-pvcreate /dev/vdc
-vgcreate metavg /dev/vdc
-lvcreate -L 32M -n erameta metavg
+<p>Everything below was run inside a QEMU VM with two virtio disks: <code>vdc</code> (256MB, for era metadata) and <code>vdd</code> (1GB, for the data volume). The kernel is Linux 6.8.0-rc3 from the device-mapper development tree, with <code>CONFIG_DM_ERA=m</code> and <code>CONFIG_DM_SNAPSHOT=m</code>.</p>
 
-# Origin device (your existing storage)
-pvcreate /dev/vdd
-vgcreate datavg /dev/vdd
-lvcreate -L 800M -n data datavg
+<h3>1. Setup: LVM + dm-era</h3>
 
-# Create dm-era
-SECTORS=$(blockdev --getsz /dev/datavg/data)
-dmsetup create eradev \
-  --table "0 $SECTORS era /dev/metavg/erameta /dev/datavg/data 64"
+<p>Create two separate volume groups &mdash; one for the era metadata, one for the data. This lets us snapshot them independently.</p>
 
-# Start periodic checkpoints (e.g., hourly cron)
-# */60 * * * * dmsetup message eradev 0 checkpoint</code></pre>
+<pre><code><span style="color:var(--fg2)"># Metadata VG (vdc)</span>
+$ pvcreate /dev/vdc
+$ vgcreate metavg /dev/vdc
+$ lvcreate -L 32M -n erameta metavg
 
-<h3>Full backup</h3>
-<pre><code># Record the current era
-BACKUP_ERA=$(dmsetup status eradev | awk '{print $6}')
-echo "$BACKUP_ERA" > /backup/last_full_era
+<span style="color:var(--fg2)"># Data VG (vdd) &mdash; this represents your existing storage</span>
+$ pvcreate /dev/vdd
+$ vgcreate datavg /dev/vdd
+$ lvcreate -L 800M -n data datavg
 
-# Take your full backup however you normally do
-dd if=/dev/mapper/eradev of=/backup/full.img bs=1M</code></pre>
+<span style="color:var(--fg2)"># Zero the metadata device and create dm-era</span>
+$ dd if=/dev/zero of=/dev/metavg/erameta bs=4096 count=1000
+$ SECTORS=$(blockdev --getsz /dev/datavg/data)   <span style="color:var(--fg2)"># 1638400</span>
+$ dmsetup create eradev \
+    --table "0 $SECTORS era /dev/metavg/erameta /dev/datavg/data 64"
 
-<h3>Differential backup (zero downtime)</h3>
-<pre><code># Step 1: Snapshot origin (consistent read)
-lvcreate -L 100M -s -n datasnap datavg/data
+$ dmsetup status eradev
+0 1638400 era 8 34/8192 1 -
+<span style="color:var(--fg2)">#                        ^current_era=1</span></code></pre>
 
-# Step 2: Snapshot metadata (for era_dump)
-lvcreate -L 32M -s -n metasnap metavg/erameta
+<p>The <code>64</code> at the end is the era block size in sectors (64 &times; 512 = 32KB). Every 32KB region of the device is tracked as a single unit.</p>
 
-# Step 3: Dump era map from metadata snapshot
-era_dump --logical /dev/metavg/metasnap > /tmp/era.xml
+<h3>2. t0&ndash;t2: Initial workload + checkpoints</h3>
 
-# Step 4: Extract dirty blocks (era >= BACKUP_ERA)
-BACKUP_ERA=$(cat /backup/last_full_era)
-python3 extract_dirty.py /tmp/era.xml $BACKUP_ERA /dev/datavg/datasnap /backup/diff.bin
+<pre><code><span style="color:var(--fg2)"># t0: Advance era (simulating a cron checkpoint)</span>
+$ dmsetup message eradev 0 checkpoint
+<span style="color:var(--fg2)"># era is now 2</span>
 
-# Step 5: Cleanup
-lvremove -f datavg/datasnap
-lvremove -f metavg/metasnap</code></pre>
+<span style="color:var(--fg2)"># t1: writes A &mdash; simulate an existing workload</span>
+$ dd if=/dev/urandom of=/dev/mapper/eradev bs=32768 count=100 oflag=direct
+$ dd if=/dev/urandom of=/dev/mapper/eradev bs=32768 count=50 seek=400 oflag=direct
+$ dd if=/dev/urandom of=/dev/mapper/eradev bs=32768 count=50 seek=700 oflag=direct
+<span style="color:var(--fg2)"># Wrote blocks 0-99, 400-449, 700-749 (all recorded in era 2)</span>
+
+<span style="color:var(--fg2)"># t2: Another cron checkpoint</span>
+$ dmsetup message eradev 0 checkpoint
+<span style="color:var(--fg2)"># era is now 3</span></code></pre>
+
+<h3>3. t3&ndash;t4: More writes, then full backup</h3>
+
+<pre><code><span style="color:var(--fg2)"># t3: writes B</span>
+$ dd if=/dev/urandom of=/dev/mapper/eradev bs=32768 count=10 seek=50 oflag=direct
+<span style="color:var(--fg2)"># Wrote blocks 50-59 (recorded in era 3)</span>
+
+<span style="color:var(--fg2)"># t4: FULL BACKUP &mdash; record the current era</span>
+$ BACKUP_ERA=$(dmsetup status eradev | awk '{print $6}')
+$ echo $BACKUP_ERA
+3
+<span style="color:var(--fg2)"># In production: dd/rsync/your-backup-tool the full device here</span>
+<span style="color:var(--fg2)"># Writes A and B are on the device, included in the full backup</span></code></pre>
+
+<h3>4. t5&ndash;t10: Post-backup writes + checkpoints</h3>
+
+<p>This is the interesting part. Writes C happen <em>after</em> the full backup but <em>before</em> the next checkpoint &mdash; they land in the same era (3) as the backup.</p>
+
+<pre><code><span style="color:var(--fg2)"># t5: writes C &mdash; AFTER full backup, but still era 3!</span>
+$ dd if=/dev/urandom of=/dev/mapper/eradev bs=32768 count=10 seek=300 oflag=direct
+<span style="color:var(--fg2)"># Wrote blocks 300-309 (recorded in era 3 &mdash; NOT in the full backup)</span>
+
+<span style="color:var(--fg2)"># t6: Checkpoint</span>
+$ dmsetup message eradev 0 checkpoint   <span style="color:var(--fg2)"># era=4</span>
+
+<span style="color:var(--fg2)"># t7: writes D</span>
+$ dd if=/dev/urandom of=/dev/mapper/eradev bs=32768 count=5 seek=0 oflag=direct
+$ dd if=/dev/urandom of=/dev/mapper/eradev bs=32768 count=20 seek=200 oflag=direct
+<span style="color:var(--fg2)"># Wrote blocks 0-4, 200-219 (era 4)</span>
+
+<span style="color:var(--fg2)"># t8: Checkpoint</span>
+$ dmsetup message eradev 0 checkpoint   <span style="color:var(--fg2)"># era=5</span>
+
+<span style="color:var(--fg2)"># t9: writes E</span>
+$ dd if=/dev/urandom of=/dev/mapper/eradev bs=32768 count=5 seek=5 oflag=direct
+$ dd if=/dev/urandom of=/dev/mapper/eradev bs=32768 count=10 seek=500 oflag=direct
+<span style="color:var(--fg2)"># Wrote blocks 5-9, 500-509 (era 5)</span>
+
+<span style="color:var(--fg2)"># t10: Checkpoint</span>
+$ dmsetup message eradev 0 checkpoint   <span style="color:var(--fg2)"># era=6</span></code></pre>
+
+<h3>5. t11: Differential backup (zero downtime)</h3>
+
+<p>Now we want a diff since the full backup. The device stays live throughout.</p>
+
+<pre><code><span style="color:var(--fg2)"># Step 1: Snapshot the data volume (consistent read)</span>
+$ lvcreate -L 100M -s -n datasnap datavg/data
+
+<span style="color:var(--fg2)"># Step 2: Snapshot the metadata volume (for era_dump)</span>
+$ lvcreate -L 32M -s -n metasnap metavg/erameta
+<span style="color:var(--fg2)"># dm-era is still running &mdash; no suspend, no downtime</span>
+
+<span style="color:var(--fg2)"># Step 3: Dump the era map from the metadata snapshot</span>
+$ era_dump --logical /dev/metavg/metasnap | head -8
+&lt;superblock uuid="" block_size="64" nr_blocks="25600" current_era="6"&gt;
+  &lt;era_array&gt;
+    &lt;era block="0" era="4"/&gt;
+    &lt;era block="1" era="4"/&gt;
+    &lt;era block="2" era="4"/&gt;
+    &lt;era block="3" era="4"/&gt;
+    &lt;era block="4" era="4"/&gt;
+    &lt;era block="5" era="5"/&gt;</code></pre>
+
+<p>Each line tells us: block N was last written in era M. To find blocks dirty since the full backup, we filter for <code>era &ge; BACKUP_ERA (3)</code>:</p>
+
+<pre><code><span style="color:var(--fg2)"># Step 4: Extract dirty block list</span>
+$ python3 -c "
+import xml.etree.ElementTree as ET
+tree = ET.parse('/tmp/era.xml')   <span style="color:var(--fg2)"># (from era_dump output)</span>
+root = tree.getroot()
+backup_era = 3
+for e in root.findall('.//era'):
+    if int(e.get('era')) >= backup_era:
+        print(f'block {e.get(\"block\")} era {e.get(\"era\")}')
+"
+
+<span style="color:var(--fg2)"># Output:</span>
+block 0 era 4         <span style="color:var(--fg2)"># writes D (t7)</span>
+block 1 era 4
+block 2 era 4
+block 3 era 4
+block 4 era 4
+block 5 era 5         <span style="color:var(--fg2)"># writes E (t9)</span>
+...
+block 50 era 3        <span style="color:var(--fg2)"># writes B (t3) &mdash; redundant, already in full backup</span>
+...
+block 59 era 3
+...
+block 200 era 4       <span style="color:var(--fg2)"># writes D (t7)</span>
+...
+block 300 era 3       <span style="color:var(--fg2)"># writes C (t5) &mdash; NOT in full backup, correctly captured!</span>
+...
+block 500 era 5       <span style="color:var(--fg2)"># writes E (t9)</span>
+...
+
+<span style="color:var(--fg2)"># Total: 60 dirty blocks</span></code></pre>
+
+<pre><code><span style="color:var(--fg2)"># Step 5: Read the dirty blocks from the data snapshot</span>
+$ python3 -c "
+import xml.etree.ElementTree as ET
+tree = ET.parse('/tmp/era.xml')
+root = tree.getroot()
+backup_era = 3
+bs = 32768
+dirty = sorted(set(int(e.get('block'))
+    for e in root.findall('.//era') if int(e.get('era')) >= backup_era))
+with open('/dev/datavg/datasnap', 'rb') as src, \
+     open('/backup/diff.bin', 'wb') as out:
+    for b in dirty:
+        src.seek(b * bs)
+        out.write(src.read(bs))
+print(f'Extracted {len(dirty)} blocks = {len(dirty)*bs//1024} KB')
+"
+Extracted 60 blocks = 1920 KB
+
+<span style="color:var(--fg2)"># Step 6: Cleanup</span>
+$ lvremove -f datavg/datasnap
+$ lvremove -f metavg/metasnap</code></pre>
+
+<div class="callout ok">
+<strong>During this entire procedure</strong>, the dm-era device was live. We verified by writing to it between steps &mdash; no errors, no pauses.
+</div>
 
 <h2>Actual Test Results</h2>
 
