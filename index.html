@@ -141,11 +141,11 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
               |       |
      +--------v--+ +--v----------+
      |  metadata | |   origin    |  &larr; your existing device
-     |  (LVM LV) | |  (LVM LV)  |     (on a separate VG/disk)
-     +-----------+ +-------------+
-         vdc            vdd</code></pre>
+     |  (LVM LV) | | (any block  |     (needs snapshot capability)
+     +-----------+ |   device)   |
+                   +-------------+</code></pre>
 
-<p>Metadata and origin are on <strong>separate LVM volume groups</strong> so they can be snapshotted independently. This is what enables zero-downtime differential backups: we snapshot the metadata to read the dirty map, and snapshot the origin to read the actual blocks &mdash; all while the device continues serving I/O.</p>
+<p>The metadata device needs to be on LVM (or similar) so we can snapshot it for <code>era_dump</code>. The origin can be anything &mdash; LVM, hardware RAID, a plain partition &mdash; as long as it supports some form of point-in-time snapshot. Both are snapshotted independently during the differential backup, without ever stopping dm-era.</p>
 
 <h2>How the Differential Backup Works</h2>
 
@@ -267,21 +267,17 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
   </div>
 </div>
 
-<h2>Why <code>era &ge;</code> and Not <code>era &gt;</code></h2>
+<h2>Safety: Taking the Diff From the Full Backup's Era</h2>
 
-<p>Look at t5 in the timeline. Writes C happen <em>after</em> the full backup, but <em>before</em> the next checkpoint. They're recorded in era 3 &mdash; the same era as the backup. If we used <code>era &gt; 3</code>, these writes would be invisible: not in the full backup, not in the diff. Data loss.</p>
+<p>The key to correctness is simple: at diff time, include all blocks from <code>era &ge; BACKUP_ERA</code> &mdash; the era that was current when the full backup ran.</p>
 
-<p>Using <code>era &ge; 3</code> captures everything in era 3, including writes B (t3) that were already in the full backup. Those are redundant, but harmless. The 10 extra blocks are the price of safety.</p>
+<p>Why not just blocks <em>after</em> that era? Because writes can happen between the full backup and the next checkpoint (t5 in the timeline above). Those writes land in the same era as the backup but aren't captured by it. By including the entire BACKUP_ERA in the diff, we guarantee these writes are never missed.</p>
 
-<div class="callout danger">
-<strong><code>era &gt; 3</code>: 40 blocks.</strong> Misses writes C (t5) entirely. These blocks exist in neither the full backup nor the diff &mdash; unrecoverable.
-</div>
+<p>The tradeoff is a small amount of redundancy: some blocks written <em>before</em> the full backup (in the same era) will appear in both the full backup and the diff. This overlap is bounded by one era's worth of writes. With hourly checkpoints, it's negligible.</p>
 
 <div class="callout ok">
-<strong><code>era &ge; 3</code>: 60 blocks.</strong> Includes 10 redundant blocks from writes B, but correctly captures writes C. All data recoverable.
+<strong>The safety guarantee:</strong> full backup + diff from <code>era &ge; BACKUP_ERA</code> always covers every write. No timing coordination between checkpoints and backups is needed. A little redundant data is the price of never missing a write.
 </div>
-
-<p>In practice, checkpoints run frequently (hourly or more), so the overlap window is small. A few redundant blocks are a trivial cost for guaranteed correctness without any timing coordination.</p>
 
 <h2>Visualization</h2>
 <p>Each cell represents a 32KB era block. The top row shows the <strong>dirty map</strong> (which blocks dm-era has tracked as written). The bottom row shows the <strong>backup state</strong> (what's been captured in full and differential backups). Step through the timeline to see how they evolve.</p>
@@ -471,13 +467,7 @@ $ lvremove -f metavg/metasnap</code></pre>
 <strong>During this entire procedure</strong>, the dm-era device was live. We verified by writing to it between steps &mdash; no errors, no pauses.
 </div>
 
-<h2>Actual Test Results</h2>
-
-<table>
-<tr><th>Query</th><th>Blocks</th><th>Includes t5 (C)?</th><th>Safe?</th></tr>
-<tr><td><code>era &gt; 3</code></td><td class="num">40</td><td style="color:var(--red)">No &mdash; data loss</td><td style="color:var(--red)">UNSAFE</td></tr>
-<tr><td><code>era &ge; 3</code></td><td class="num">60</td><td style="color:var(--green)">Yes</td><td style="color:var(--green)">SAFE</td></tr>
-</table>
+<h2>Results</h2>
 
 <div style="display:flex;gap:16px;margin:24px 0;flex-wrap:wrap;">
   <div class="result-box" style="flex:1;min-width:200px;">
@@ -494,23 +484,21 @@ $ lvremove -f metavg/metasnap</code></pre>
   </div>
 </div>
 
-<div class="callout">
-<strong>Zero downtime confirmed.</strong> During the entire differential backup (snapshot + dump + extract), the dm-era device remained live and accepted writes without interruption.
-</div>
-
-<h2>Dirty Block Breakdown</h2>
+<h3>Dirty Block Breakdown</h3>
 
 <table>
 <tr><th>Blocks</th><th>Era</th><th>Written at</th><th>In full backup?</th><th>In diff?</th></tr>
 <tr><td>50-59</td><td class="num">3</td><td>t3 (writes B)</td><td style="color:var(--green)">Yes (redundant)</td><td>Yes</td></tr>
-<tr><td>300-309</td><td class="num">3</td><td>t5 (writes C)</td><td style="color:var(--red)">No</td><td>Yes</td></tr>
-<tr><td>0-4</td><td class="num">4</td><td>t7 (writes D)</td><td style="color:var(--red)">No</td><td>Yes</td></tr>
-<tr><td>200-219</td><td class="num">4</td><td>t7 (writes D)</td><td style="color:var(--red)">No</td><td>Yes</td></tr>
-<tr><td>5-9</td><td class="num">5</td><td>t9 (writes E)</td><td style="color:var(--red)">No</td><td>Yes</td></tr>
-<tr><td>500-509</td><td class="num">5</td><td>t9 (writes E)</td><td style="color:var(--red)">No</td><td>Yes</td></tr>
+<tr><td>300-309</td><td class="num">3</td><td>t5 (writes C)</td><td style="color:var(--red)">No</td><td style="color:var(--green)">Yes</td></tr>
+<tr><td>0-4</td><td class="num">4</td><td>t7 (writes D)</td><td style="color:var(--red)">No</td><td style="color:var(--green)">Yes</td></tr>
+<tr><td>200-219</td><td class="num">4</td><td>t7 (writes D)</td><td style="color:var(--red)">No</td><td style="color:var(--green)">Yes</td></tr>
+<tr><td>5-9</td><td class="num">5</td><td>t9 (writes E)</td><td style="color:var(--red)">No</td><td style="color:var(--green)">Yes</td></tr>
+<tr><td>500-509</td><td class="num">5</td><td>t9 (writes E)</td><td style="color:var(--red)">No</td><td style="color:var(--green)">Yes</td></tr>
 </table>
 
-<p>Blocks 50-59 (writes B) are the "overlap" &mdash; they're in both the full backup and the differential. This is the cost of not aligning checkpoints to backup times. In practice, with hourly checkpoints, the overlap is at most one era's worth of writes.</p>
+<p>Blocks 50-59 (writes B) are the only redundancy &mdash; they're in both the full backup and the diff. This is the cost of including the full BACKUP_ERA: we pick up a few blocks that were written <em>before</em> the full backup in the same era. In practice, with hourly checkpoints, this overlap is at most one era's worth of writes &mdash; negligible compared to the total device size.</p>
+
+<p>The critical row is blocks 300-309 (writes C). These were written <em>after</em> the full backup but in the <em>same era</em>. By taking the diff from the BACKUP_ERA onwards, they're correctly captured without any timing coordination.</p>
 
 
 <footer>
