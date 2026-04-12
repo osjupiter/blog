@@ -278,6 +278,28 @@ $ echo "$BACKUP_ERA" > /backup/last_full_era</code></pre>
 </div>
 
 
+<h2>Visualization</h2>
+<p>The timeline above, visualized block by block. Each cell is a 32KB block. Three maps show the device contents, dm-era's dirty tracking, and the backup state at each step.</p>
+
+<div class="blockmap-wrap">
+  <div class="blockmap-header">
+    <span class="title">BLOCK STATE</span>
+    <div class="blockmap-controls" id="bm-controls"></div>
+  </div>
+  <div class="blockmap-body" style="padding: 12px;">
+    <div style="font-size: 11px; color: var(--fg2); margin-bottom: 4px; font-weight: 600;">DEVICE &mdash; actual block contents</div>
+    <canvas id="devicemap" class="blockmap-canvas"></canvas>
+    <div style="font-size: 11px; color: var(--fg2); margin: 12px 0 4px; font-weight: 600;">DIRTY MAP &mdash; dm-era's per-era tracking</div>
+    <canvas id="blockmap" class="blockmap-canvas"></canvas>
+    <div style="font-size: 11px; color: var(--fg2); margin: 12px 0 4px; font-weight: 600;">BACKUP &mdash; what's been captured</div>
+    <canvas id="backupmap" class="blockmap-canvas"></canvas>
+  </div>
+  <div id="bm-info" style="padding: 8px 12px; font-size: 12px; color: var(--fg2); border-top: 1px solid #222;">
+    Click a step to see the state at that point.
+  </div>
+  <div class="blockmap-legend" id="bm-legend"></div>
+</div>
+
 <h2>Experiment: Full Walkthrough</h2>
 
 <p>Everything below was run inside a QEMU VM with two virtio disks: <code>vdc</code> (256MB, for era metadata) and <code>vdd</code> (1GB, for the data volume). The kernel is Linux 6.8.0-rc3 from the device-mapper development tree, with <code>CONFIG_DM_ERA=m</code> and <code>CONFIG_DM_SNAPSHOT=m</code>.</p>
@@ -449,28 +471,6 @@ $ lvremove -f metavg/metasnap</code></pre>
 <strong>During this entire procedure</strong>, the dm-era device was live. We verified by writing to it between steps &mdash; no errors, no pauses.
 </div>
 
-<h2>Visualization</h2>
-<p>The scenario above, visualized. Each cell is a 32KB block. Three maps show different perspectives of the same device at each point in the timeline.</p>
-
-<div class="blockmap-wrap">
-  <div class="blockmap-header">
-    <span class="title">BLOCK STATE</span>
-    <div class="blockmap-controls" id="bm-controls"></div>
-  </div>
-  <div class="blockmap-body" style="padding: 12px;">
-    <div style="font-size: 11px; color: var(--fg2); margin-bottom: 4px; font-weight: 600;">DEVICE &mdash; actual block contents (written / unwritten)</div>
-    <canvas id="devicemap" class="blockmap-canvas"></canvas>
-    <div style="font-size: 11px; color: var(--fg2); margin: 12px 0 4px; font-weight: 600;">DIRTY MAP &mdash; dm-era's per-era tracking</div>
-    <canvas id="blockmap" class="blockmap-canvas"></canvas>
-    <div style="font-size: 11px; color: var(--fg2); margin: 12px 0 4px; font-weight: 600;">BACKUP &mdash; what's been captured in full / diff</div>
-    <canvas id="backupmap" class="blockmap-canvas"></canvas>
-  </div>
-  <div id="bm-info" style="padding: 8px 12px; font-size: 12px; color: var(--fg2); border-top: 1px solid #222;">
-    Hover over blocks for details.
-  </div>
-  <div class="blockmap-legend" id="bm-legend"></div>
-</div>
-
 <h2>Results</h2>
 
 <div style="display:flex;gap:16px;margin:24px 0;flex-wrap:wrap;">
@@ -534,8 +534,7 @@ function applyT5(m) { for(let i=300;i<310;i++) m[i]=3; }
 function applyT7(m) { for(let i=0;i<5;i++) m[i]=4; for(let i=200;i<220;i++) m[i]=4; }
 function applyT9(m) { for(let i=5;i<10;i++) m[i]=5; for(let i=500;i<510;i++) m[i]=5; }
 
-// Build phases: { name, data (era map), backup (backup state per block) }
-// backup states: 0=none, 1=full, 2=not-backed-up, 3=diff, 4=both(full+diff overlap)
+// backup states: 0=none, 1=full, 3=diff, 4=both(full+diff overlap)
 const phases = [];
 function buildPhases() {
   const defs = [
@@ -560,25 +559,22 @@ function buildPhases() {
     if (d.backupEvent === 'diff') {
       for (let i = 0; i < N; i++) if (m[i] >= BACKUP_ERA) diffBacked[i] = true;
     }
-    // Build backup state
     const bk = new Array(N).fill(0);
     for (let i = 0; i < N; i++) {
-      const written = m[i] > 0;
       const inFull = fullBacked[i];
       const inDiff = diffBacked[i];
-      if (!written) bk[i] = 0;
-      else if (inFull && inDiff) bk[i] = 4;
+      if (inFull && inDiff) bk[i] = 4;
       else if (inDiff) bk[i] = 3;
       else if (inFull) bk[i] = 1;
-      else bk[i] = 2; // written but not backed up
+      // 0 = nothing to show (no "not backed up" state)
     }
     phases.push({ name: d.name, data: [...m], backup: [...bk] });
   }
 }
 buildPhases();
 
-const DEV_WRITTEN = '#3a7ca5';  // block has data
-const DEV_FRESH = '#d4a017';    // newly written this step
+const DEV_WRITTEN = '#3a7ca5';
+const DEV_FRESH = '#d4a017';
 
 const dcanvas = document.getElementById('devicemap');
 const dctx = dcanvas.getContext('2d');
@@ -594,19 +590,25 @@ const H = ROWS * (CELL + GAP) + GAP;
 
 let currentPhase = 0;
 
-function drawBlock(c, i, color, highlight) {
+// Color interpolation helpers
+function parseHex(hex) {
+  const h = hex.replace('#','');
+  return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)];
+}
+function lerpColor(a, b, t) {
+  const [ar,ag,ab] = parseHex(a), [br,bg,bb] = parseHex(b);
+  const r = Math.round(ar + (br-ar)*t), g = Math.round(ag + (bg-ag)*t), bl = Math.round(ab + (bb-ab)*t);
+  return `rgb(${r},${g},${bl})`;
+}
+
+function drawBlock(c, i, color) {
   const col = i % COLS, row = Math.floor(i / COLS);
   const x = GAP + col * (CELL + GAP), y = GAP + row * (CELL + GAP);
   c.fillStyle = color;
   c.fillRect(x, y, CELL, CELL);
-  if (highlight) {
-    c.strokeStyle = '#fff';
-    c.lineWidth = 1;
-    c.strokeRect(x + 0.5, y + 0.5, CELL - 1, CELL - 1);
-  }
 }
 
-function draw() {
+function drawStatic() {
   const p = phases[currentPhase];
   const prev = currentPhase > 0 ? phases[currentPhase - 1] : null;
   const isDiff = currentPhase === phases.length - 1;
@@ -620,22 +622,87 @@ function draw() {
     const written = era > 0;
     const fresh = written && era !== prevEra;
 
-    // Device map: written blocks, highlight freshly written
-    drawBlock(dctx, i, written ? (fresh ? DEV_FRESH : DEV_WRITTEN) : '#1a1a1a', false);
+    // Device
+    drawBlock(dctx, i, written ? (fresh ? DEV_FRESH : DEV_WRITTEN) : '#1a1a1a');
 
-    // Dirty map: era colors, highlight dirty in diff phase
+    // Dirty map
     const dirty = isDiff && era >= BACKUP_ERA;
     let color = eraColors[era] || '#333';
-    if (dirty) {
-      color = era === 3 ? '#c39bd3' : (era === 4 ? '#f0b27a' : '#58d68d');
-    }
-    drawBlock(ctx, i, color, dirty);
+    if (dirty) color = era === 3 ? '#c39bd3' : (era === 4 ? '#f0b27a' : '#58d68d');
+    drawBlock(ctx, i, color);
 
-    // Backup map
+    // Backup (no animation state)
     const bk = p.backup[i];
-    const bkColor = bk === 0 ? BK_NONE : bk === 1 ? BK_FULL : bk === 2 ? BK_MISSING : bk === 3 ? BK_DIFF : BK_BOTH;
-    drawBlock(bctx, i, bkColor, bk === 2);
+    const bkColor = bk === 0 ? BK_NONE : bk === 1 ? BK_FULL : bk === 3 ? BK_DIFF : BK_BOTH;
+    drawBlock(bctx, i, bkColor);
   }
+}
+
+// === Fade animation ===
+let animId = null;
+
+function stopAnim() {
+  if (animId) { cancelAnimationFrame(animId); animId = null; }
+}
+
+function animateBackup() {
+  const p = phases[currentPhase];
+  let sourceBlocks = []; // blocks on device+dirty map to flash white
+  let targetBlocks = []; // blocks on backup map to fade in
+  let targetColor = BK_FULL;
+
+  if (p.name.includes('FULL BACKUP')) {
+    for (let i = 0; i < N; i++) if (p.data[i] > 0) { sourceBlocks.push(i); targetBlocks.push(i); }
+    targetColor = BK_FULL;
+  } else if (p.name.includes('DIFF BACKUP')) {
+    for (let i = 0; i < N; i++) if (p.data[i] >= BACKUP_ERA) { sourceBlocks.push(i); targetBlocks.push(i); }
+    targetColor = BK_DIFF;
+  } else {
+    return; // no animation for non-backup steps
+  }
+
+  const duration = 800; // ms
+  const start = performance.now();
+
+  // Draw base state without backup blocks
+  drawStatic();
+  // Clear backup map for animated blocks
+  for (const i of targetBlocks) drawBlock(bctx, i, BK_NONE);
+
+  function frame(now) {
+    const elapsed = now - start;
+    const t = Math.min(elapsed / duration, 1);
+    // Easing: ease-out cubic
+    const ease = 1 - Math.pow(1 - t, 3);
+
+    // Source flash: white -> original color (device + dirty map)
+    const flashT = Math.min(t * 2, 1); // flash is faster
+    for (const i of sourceBlocks) {
+      const era = p.data[i];
+      // Device: flash white -> written color
+      const devColor = lerpColor('#ffffff', DEV_WRITTEN, flashT);
+      drawBlock(dctx, i, devColor);
+      // Dirty map: flash white -> era color
+      const eraColor = eraColors[era] || '#333';
+      const mapColor = lerpColor('#ffffff', eraColor, flashT);
+      drawBlock(ctx, i, mapColor);
+    }
+
+    // Backup: fade in from dark
+    for (const i of targetBlocks) {
+      const bk = p.backup[i];
+      const finalColor = bk === 4 ? BK_BOTH : targetColor;
+      const color = lerpColor(BK_NONE, finalColor, ease);
+      drawBlock(bctx, i, color);
+    }
+
+    if (t < 1) {
+      animId = requestAnimationFrame(frame);
+    } else {
+      animId = null;
+    }
+  }
+  animId = requestAnimationFrame(frame);
 }
 
 // Controls
@@ -644,7 +711,14 @@ phases.forEach((p, i) => {
   const btn = document.createElement('button');
   btn.textContent = p.name.split(':')[0];
   btn.title = p.name;
-  btn.onclick = () => { currentPhase = i; updateControls(); draw(); updateInfo(); };
+  btn.onclick = () => {
+    stopAnim();
+    currentPhase = i;
+    updateControls();
+    drawStatic();
+    updateInfo();
+    animateBackup();
+  };
   controls.appendChild(btn);
 });
 
@@ -657,18 +731,18 @@ function updateInfo() {
   const info = document.getElementById('bm-info');
   const written = p.data.filter(e => e > 0).length;
   const dirty = p.data.filter(e => e >= BACKUP_ERA).length;
-  const notBacked = p.backup.filter(b => b === 2).length;
+  const backed = p.backup.filter(b => b > 0).length;
   let text = `<strong>${p.name}</strong> &mdash; ${written} blocks on device`;
   if (currentPhase === phases.length - 1) {
     text += ` &mdash; <span style="color:var(--green)">${dirty} blocks in diff</span>`;
   }
-  if (notBacked > 0) {
-    text += ` &mdash; <span style="color:var(--red)">${notBacked} not yet backed up</span>`;
+  if (backed > 0) {
+    text += ` &mdash; ${backed} blocks backed up`;
   }
   info.innerHTML = text;
 }
 
-// Hover on any canvas
+// Hover
 function handleHover(e, canvasEl) {
   const rect = canvasEl.getBoundingClientRect();
   const col = Math.floor((e.clientX - rect.left) / (CELL + GAP));
@@ -678,9 +752,9 @@ function handleHover(e, canvasEl) {
     const p = phases[currentPhase];
     const era = p.data[block];
     const bk = p.backup[block];
-    const bkLabel = ['not written','in full backup','NOT BACKED UP','in diff backup','in full + diff (overlap)'][bk];
+    const bkLabel = ['','in full backup','','in diff backup','in full + diff (overlap)'][bk] || (era > 0 ? 'not yet backed up' : 'unwritten');
     const info = document.getElementById('bm-info');
-    info.innerHTML = `Block ${block} (${block*32}KB) &mdash; era ${era}${era===0?' (unwritten)':''} &mdash; <strong>${bkLabel}</strong>`;
+    info.innerHTML = `Block ${block} (${block*32}KB) &mdash; era ${era}${era===0?' (unwritten)':''} &mdash; ${bkLabel}`;
   }
 }
 [dcanvas, canvas, bcanvas].forEach(c => c.addEventListener('mousemove', (e) => handleHover(e, c)));
@@ -688,10 +762,9 @@ function handleHover(e, canvasEl) {
 // Legend
 const legend = document.getElementById('bm-legend');
 const legendItems = [
-  [DEV_WRITTEN,'written (device)'], [DEV_FRESH,'newly written (this step)'],
+  [DEV_WRITTEN,'written'], [DEV_FRESH,'newly written'],
   ['#1a5276','era 2'], ['#7d3c98','era 3'], ['#b9770e','era 4'], ['#1e8449','era 5'],
-  [BK_FULL,'in full backup'], [BK_DIFF,'in diff backup'],
-  [BK_BOTH,'in both (overlap)'], [BK_MISSING,'not backed up'],
+  [BK_FULL,'in full backup'], [BK_DIFF,'in diff backup'], [BK_BOTH,'in both (overlap)'],
 ];
 for (const [color, label] of legendItems) {
   const span = document.createElement('span');
@@ -703,61 +776,7 @@ for (const [color, label] of legendItems) {
   legend.appendChild(span);
 }
 
-// Animation for backup events
-let animFrame = 0;
-let animActive = false;
-let animBlocks = [];
-let animTargetCtx = null;
-let animColor = '#fff';
-
-function flashBackup() {
-  const p = phases[currentPhase];
-  animBlocks = [];
-  if (p.name.includes('FULL BACKUP')) {
-    for (let i = 0; i < N; i++) if (p.data[i] > 0) animBlocks.push(i);
-    animTargetCtx = bctx;
-    animColor = BK_FULL;
-  } else if (p.name.includes('DIFF BACKUP')) {
-    for (let i = 0; i < N; i++) if (p.data[i] >= BACKUP_ERA) animBlocks.push(i);
-    animTargetCtx = bctx;
-    animColor = BK_DIFF;
-  } else {
-    return;
-  }
-  animFrame = 0;
-  animActive = true;
-  animateFlash();
-}
-
-function animateFlash() {
-  if (!animActive || animFrame > 12) {
-    animActive = false;
-    draw(); // redraw final state
-    return;
-  }
-  const on = animFrame % 2 === 0;
-  for (const i of animBlocks) {
-    drawBlock(animTargetCtx, i, on ? '#fff' : animColor, false);
-  }
-  animFrame++;
-  requestAnimationFrame(() => setTimeout(animateFlash, 100));
-}
-
-// Patch controls to trigger animation
-const origOnclick = [];
-controls.querySelectorAll('button').forEach((btn, i) => {
-  const orig = btn.onclick;
-  btn.onclick = () => {
-    animActive = false;
-    currentPhase = i;
-    updateControls();
-    draw();
-    updateInfo();
-    flashBackup();
-  };
-});
-
-updateControls(); draw(); updateInfo();
+updateControls(); drawStatic(); updateInfo();
 </script>
 </body>
 </html>
