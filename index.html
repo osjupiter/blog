@@ -275,6 +275,15 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 
 <p>The tradeoff is a small amount of redundancy: some blocks written <em>before</em> the full backup (in the same era) will appear in both the full backup and the diff. This overlap is bounded by one era's worth of writes. With hourly checkpoints, it's negligible.</p>
 
+<h3>How to record the BACKUP_ERA</h3>
+
+<p>You don't need to maintain a table mapping era numbers to timestamps. At full-backup time, just read the current era and save it alongside the backup:</p>
+
+<pre><code>$ BACKUP_ERA=$(dmsetup status eradev | awk '{print $6}')
+$ echo "$BACKUP_ERA" > /backup/last_full_era</code></pre>
+
+<p>That's the only bookkeeping required. At diff time, read it back and query <code>era &ge; $BACKUP_ERA</code>. Since the era number is recorded at the moment of the full backup, it automatically identifies the correct starting point for the diff &mdash; no need to correlate eras with clock times.</p>
+
 <div class="callout ok">
 <strong>The safety guarantee:</strong> full backup + diff from <code>era &ge; BACKUP_ERA</code> always covers every write. No timing coordination between checkpoints and backups is needed. A little redundant data is the price of never missing a write.
 </div>
