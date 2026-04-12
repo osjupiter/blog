@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zero-Downtime Differential Backup with dm-era + LVM Snapshots</title>
+<style>
+:root {
+  --bg: #0c0c0c;
+  --bg2: #151515;
+  --bg3: #1a1a1a;
+  --fg: #d4d4d4;
+  --fg2: #888;
+  --accent: #0af;
+  --orange: #f80;
+  --red: #f44;
+  --green: #0f6;
+  --purple: #c6f;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; line-height: 1.7; }
+.container { max-width: 860px; margin: 0 auto; padding: 40px 24px; }
+h1 { font-size: 2em; line-height: 1.3; margin-bottom: 8px; color: #fff; }
+.subtitle { color: var(--fg2); font-size: 1.05em; margin-bottom: 40px; }
+h2 { font-size: 1.4em; margin: 48px 0 16px; color: #eee; border-bottom: 1px solid #222; padding-bottom: 8px; }
+h3 { font-size: 1.15em; margin: 32px 0 12px; color: #ccc; }
+p { margin-bottom: 16px; color: var(--fg); }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { background: var(--bg3); padding: 2px 6px; border-radius: 3px; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.9em; color: #ddd; }
+pre { background: var(--bg2); padding: 16px; border-radius: 6px; overflow-x: auto; margin: 16px 0; border: 1px solid #222; }
+pre code { background: none; padding: 0; font-size: 0.85em; }
+.callout { background: var(--bg2); border-left: 3px solid var(--accent); padding: 16px 20px; margin: 20px 0; border-radius: 0 6px 6px 0; }
+.callout.warn { border-left-color: var(--orange); }
+.callout.danger { border-left-color: var(--red); }
+.callout.ok { border-left-color: var(--green); }
+.callout strong { color: #eee; }
+table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.9em; }
+th, td { padding: 8px 12px; border: 1px solid #222; text-align: left; }
+th { background: var(--bg2); color: #ccc; font-weight: 600; }
+td { color: var(--fg); }
+.num { text-align: right; font-family: 'JetBrains Mono', monospace; }
+
+/* Timeline */
+.timeline { margin: 32px 0; position: relative; }
+.timeline::before {
+  content: ''; position: absolute; left: 60px; top: 0; bottom: 0;
+  width: 2px; background: #333;
+}
+.tl-item {
+  display: flex; align-items: flex-start; margin: 0; padding: 8px 0;
+  position: relative;
+}
+.tl-label {
+  width: 50px; text-align: right; font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85em; color: var(--fg2); padding-top: 2px; flex-shrink: 0;
+}
+.tl-dot {
+  width: 12px; height: 12px; border-radius: 50%; margin: 4px 12px 0 8px;
+  flex-shrink: 0; z-index: 1;
+}
+.tl-dot.checkpoint { background: var(--accent); }
+.tl-dot.write { background: var(--orange); }
+.tl-dot.backup { background: var(--green); }
+.tl-dot.danger { background: var(--red); }
+.tl-dot.diff { background: var(--purple); }
+.tl-content { flex: 1; }
+.tl-content .desc { font-size: 0.9em; }
+.tl-content .detail { font-size: 0.8em; color: var(--fg2); }
+.tl-era {
+  display: inline-block; background: var(--bg3); border: 1px solid #333;
+  padding: 1px 6px; border-radius: 3px; font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8em; margin-left: 8px;
+}
+
+/* Block map visualization */
+.blockmap-wrap { margin: 24px 0; border: 1px solid #222; border-radius: 6px; overflow: hidden; }
+.blockmap-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 12px; background: var(--bg2); border-bottom: 1px solid #222;
+}
+.blockmap-header .title { font-size: 0.85em; color: var(--fg2); font-weight: 600; }
+.blockmap-controls { display: flex; gap: 8px; }
+.blockmap-controls button {
+  background: #222; color: #ccc; border: 1px solid #444; padding: 3px 10px;
+  cursor: pointer; font-family: inherit; font-size: 11px; border-radius: 3px;
+}
+.blockmap-controls button:hover { background: #333; }
+.blockmap-controls button.active { background: #333; border-color: var(--accent); color: var(--accent); }
+.blockmap-body { padding: 12px; }
+.blockmap-canvas { width: 100%; height: auto; display: block; image-rendering: pixelated; }
+.blockmap-legend {
+  display: flex; gap: 16px; padding: 8px 12px; font-size: 11px;
+  color: var(--fg2); border-top: 1px solid #222; flex-wrap: wrap;
+}
+.blockmap-legend span { display: flex; align-items: center; gap: 4px; }
+.blockmap-legend .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+
+/* Result highlight */
+.result-box {
+  background: var(--bg2); border: 1px solid #333; border-radius: 6px;
+  padding: 20px; margin: 24px 0; text-align: center;
+}
+.result-box .big { font-size: 2.5em; font-weight: 700; color: var(--green); }
+.result-box .label { font-size: 0.9em; color: var(--fg2); margin-top: 4px; }
+
+footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: var(--fg2); font-size: 0.85em; text-align: center; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>Zero-Downtime Differential Backup with dm-era + LVM Snapshots</h1>
+<p class="subtitle">Using the kernel's dirty block tracker to copy only what changed, without stopping the device.</p>
+
+<h2>The Problem</h2>
+<p>You have a block device (a database volume, a VM disk, whatever). You take periodic full backups. Between full backups, you want <em>differential</em> backups that capture only the blocks that changed since the last full backup. You need this to work:</p>
+<ul style="margin: 0 0 16px 24px;">
+<li>Without stopping or freezing the device</li>
+<li>Without scanning the entire device to find changes</li>
+<li>Without precise timing coordination between backups and change tracking</li>
+</ul>
+
+<h3>Why not LVM thin + thin_delta?</h3>
+<p>LVM thin provisioning has <code>thin_delta</code>, which can diff two thin snapshots to find changed blocks. But it requires the device to be <strong>created as a thin volume from the start</strong>. If you have an existing device &mdash; a hardware RAID, an appliance-managed volume, a plain partition &mdash; you can't retroactively add thin provisioning without migrating all the data.</p>
+
+<p><code>dm-era</code> solves this differently. It's a transparent wrapper that can be placed in front of <strong>any existing block device</strong>, no matter how it was created. All you need is a small metadata volume. The origin device doesn't need to be thin-provisioned, doesn't need to be LVM-managed, and doesn't need any special setup at creation time.</p>
+
+<p>And since dm-era uses a simple linear mapping (not thin provisioning), there's no thin pool to manage &mdash; no pool sizing, no monitoring for pool exhaustion, no risk of the pool running full and freezing your writes. The metadata volume is tiny and fixed-size. The origin passes I/O straight through with no indirection.</p>
+
+<p>The Linux kernel has a little-known device-mapper target called <code>dm-era</code> that does exactly this. It sits transparently in front of a block device and records which blocks were written in each "era" &mdash; a monotonically increasing epoch counter advanced by periodic checkpoints.</p>
+
+<h2>The Architecture</h2>
+
+<p>dm-era wraps an existing block device (the "origin") and uses a small metadata device to track writes. All I/O passes through transparently &mdash; zero overhead on reads, minimal bookkeeping on writes.</p>
+
+<pre><code>              Reads/Writes
+                  |
+           +------v------+
+           |   dm-era    |  &larr; records which blocks are dirty per era
+           +--+-------+--+
+              |       |
+     +--------v--+ +--v----------+
+     |  metadata | |   origin    |  &larr; your existing device
+     |  (LVM LV) | |  (LVM LV)  |     (on a separate VG/disk)
+     +-----------+ +-------------+
+         vdc            vdd</code></pre>
+
+<p>The key insight: metadata and origin are on <strong>separate LVM volume groups</strong>, each with snapshot capability. This means we can snapshot both independently, without ever stopping dm-era.</p>
+
+<h2>The Timeline</h2>
+
+<p>Here's the scenario we tested. Checkpoints run on a cron (every few minutes/hours). The full backup happens at an <em>arbitrary</em> time &mdash; not aligned to any checkpoint.</p>
+
+<div class="timeline">
+  <div class="tl-item">
+    <span class="tl-label">t0</span>
+    <span class="tl-dot checkpoint"></span>
+    <div class="tl-content">
+      <div class="desc">checkpoint</div>
+      <div class="detail">era advances <span class="tl-era">era=2</span></div>
+    </div>
+  </div>
+  <div class="tl-item">
+    <span class="tl-label">t1</span>
+    <span class="tl-dot write"></span>
+    <div class="tl-content">
+      <div class="desc">writes A &mdash; initial workload</div>
+      <div class="detail">blocks 0-99, 400-449, 700-749 &rarr; recorded in era 2</div>
+    </div>
+  </div>
+  <div class="tl-item">
+    <span class="tl-label">t2</span>
+    <span class="tl-dot checkpoint"></span>
+    <div class="tl-content">
+      <div class="desc">checkpoint</div>
+      <div class="detail">era advances <span class="tl-era">era=3</span></div>
+    </div>
+  </div>
+  <div class="tl-item">
+    <span class="tl-label">t3</span>
+    <span class="tl-dot write"></span>
+    <div class="tl-content">
+      <div class="desc">writes B &mdash; more workload</div>
+      <div class="detail">blocks 50-59 &rarr; recorded in era 3</div>
+    </div>
+  </div>
+  <div class="tl-item">
+    <span class="tl-label" style="color:var(--green)">t4</span>
+    <span class="tl-dot backup"></span>
+    <div class="tl-content">
+      <div class="desc"><strong>FULL BACKUP</strong></div>
+      <div class="detail">Record <code>BACKUP_ERA=3</code> (current era at this moment). Writes A+B are on the device and included in the full backup.</div>
+    </div>
+  </div>
+  <div class="tl-item">
+    <span class="tl-label" style="color:var(--red)">t5</span>
+    <span class="tl-dot danger"></span>
+    <div class="tl-content">
+      <div class="desc">writes C &mdash; <strong>after full backup, same era!</strong></div>
+      <div class="detail">blocks 300-309 &rarr; still recorded in era 3 (no checkpoint yet). <strong>Not in the full backup.</strong></div>
+    </div>
+  </div>
+  <div class="tl-item">
+    <span class="tl-label">t6</span>
+    <span class="tl-dot checkpoint"></span>
+    <div class="tl-content">
+      <div class="desc">checkpoint</div>
+      <div class="detail">era advances <span class="tl-era">era=4</span></div>
+    </div>
+  </div>
+  <div class="tl-item">
+    <span class="tl-label">t7</span>
+    <span class="tl-dot write"></span>
+    <div class="tl-content">
+      <div class="desc">writes D</div>
+      <div class="detail">blocks 0-4, 200-219 &rarr; recorded in era 4</div>
+    </div>
+  </div>
+  <div class="tl-item">
+    <span class="tl-label">t8</span>
+    <span class="tl-dot checkpoint"></span>
+    <div class="tl-content">
+      <div class="desc">checkpoint</div>
+      <div class="detail">era advances <span class="tl-era">era=5</span></div>
+    </div>
+  </div>
+  <div class="tl-item">
+    <span class="tl-label">t9</span>
+    <span class="tl-dot write"></span>
+    <div class="tl-content">
+      <div class="desc">writes E</div>
+      <div class="detail">blocks 5-9, 500-509 &rarr; recorded in era 5</div>
+    </div>
+  </div>
+  <div class="tl-item">
+    <span class="tl-label">t10</span>
+    <span class="tl-dot checkpoint"></span>
+    <div class="tl-content">
+      <div class="desc">checkpoint</div>
+      <div class="detail">era advances <span class="tl-era">era=6</span></div>
+    </div>
+  </div>
+  <div class="tl-item">
+    <span class="tl-label" style="color:var(--purple)">t11</span>
+    <span class="tl-dot diff"></span>
+    <div class="tl-content">
+      <div class="desc"><strong>DIFFERENTIAL BACKUP</strong></div>
+      <div class="detail">Snapshot both origin and metadata. Query <code>era &ge; BACKUP_ERA</code> for dirty blocks.</div>
+    </div>
+  </div>
+</div>
+
+<h2>Why <code>era &ge;</code>, not <code>era &gt;</code></h2>
+
+<p>This is the critical subtlety. At t4 (full backup), the current era is 3. But writes C at t5 happen <em>after</em> the full backup and are <em>also</em> recorded in era 3 &mdash; because no checkpoint has occurred between t4 and t5.</p>
+
+<div class="callout danger">
+<strong>era &gt; 3 is UNSAFE.</strong> It would return 40 blocks (D + E only), missing the 10 blocks written at t5. Those blocks are not in the full backup either &mdash; data loss.
+</div>
+
+<div class="callout ok">
+<strong>era &ge; 3 is SAFE.</strong> It returns 60 blocks (B + C + D + E). The 10 blocks from B (t3) are redundant &mdash; they're already in the full backup &mdash; but writes C at t5 are correctly captured.
+</div>
+
+<p>The tradeoff: using <code>&ge;</code> includes some blocks that are already in the full backup. But since era checkpoints run frequently (hourly or more), the overlap window is small and the extra data is negligible.</p>
+
+<div class="callout">
+<strong>The key property:</strong> checkpoint timing and backup timing don't need to be coordinated. Checkpoints run on their own schedule (cron). Backups happen whenever. As long as you record the current era at full-backup time and use <code>&ge;</code> at diff-backup time, no writes are missed.
+</div>
+
+<h2>Block Map Visualization</h2>
+<p>Each cell represents a 32KB era block. Colors show which era last wrote to that block. Use the buttons to step through the timeline.</p>
+
+<div class="blockmap-wrap">
+  <div class="blockmap-header">
+    <span class="title">ERA BLOCK MAP (first 800 blocks = 25.6 MB)</span>
+    <div class="blockmap-controls" id="bm-controls"></div>
+  </div>
+  <div class="blockmap-body">
+    <canvas id="blockmap" class="blockmap-canvas"></canvas>
+  </div>
+  <div id="bm-info" style="padding: 8px 12px; font-size: 12px; color: var(--fg2); border-top: 1px solid #222;">
+    Hover over blocks for details.
+  </div>
+  <div class="blockmap-legend" id="bm-legend"></div>
+</div>
+
+<h2>The Differential Backup Procedure</h2>
+
+<h3>Setup (one-time)</h3>
+<pre><code># Metadata device (separate VG for independent snapshots)
+pvcreate /dev/vdc
+vgcreate metavg /dev/vdc
+lvcreate -L 32M -n erameta metavg
+
+# Origin device (your existing storage)
+pvcreate /dev/vdd
+vgcreate datavg /dev/vdd
+lvcreate -L 800M -n data datavg
+
+# Create dm-era
+SECTORS=$(blockdev --getsz /dev/datavg/data)
+dmsetup create eradev \
+  --table "0 $SECTORS era /dev/metavg/erameta /dev/datavg/data 64"
+
+# Start periodic checkpoints (e.g., hourly cron)
+# */60 * * * * dmsetup message eradev 0 checkpoint</code></pre>
+
+<h3>Full backup</h3>
+<pre><code># Record the current era
+BACKUP_ERA=$(dmsetup status eradev | awk '{print $6}')
+echo "$BACKUP_ERA" > /backup/last_full_era
+
+# Take your full backup however you normally do
+dd if=/dev/mapper/eradev of=/backup/full.img bs=1M</code></pre>
+
+<h3>Differential backup (zero downtime)</h3>
+<pre><code># Step 1: Snapshot origin (consistent read)
+lvcreate -L 100M -s -n datasnap datavg/data
+
+# Step 2: Snapshot metadata (for era_dump)
+lvcreate -L 32M -s -n metasnap metavg/erameta
+
+# Step 3: Dump era map from metadata snapshot
+era_dump --logical /dev/metavg/metasnap > /tmp/era.xml
+
+# Step 4: Extract dirty blocks (era >= BACKUP_ERA)
+BACKUP_ERA=$(cat /backup/last_full_era)
+python3 extract_dirty.py /tmp/era.xml $BACKUP_ERA /dev/datavg/datasnap /backup/diff.bin
+
+# Step 5: Cleanup
+lvremove -f datavg/datasnap
+lvremove -f metavg/metasnap</code></pre>
+
+<h2>Actual Test Results</h2>
+
+<table>
+<tr><th>Query</th><th>Blocks</th><th>Includes t5 (C)?</th><th>Safe?</th></tr>
+<tr><td><code>era &gt; 3</code></td><td class="num">40</td><td style="color:var(--red)">No &mdash; data loss</td><td style="color:var(--red)">UNSAFE</td></tr>
+<tr><td><code>era &ge; 3</code></td><td class="num">60</td><td style="color:var(--green)">Yes</td><td style="color:var(--green)">SAFE</td></tr>
+</table>
+
+<div style="display:flex;gap:16px;margin:24px 0;flex-wrap:wrap;">
+  <div class="result-box" style="flex:1;min-width:200px;">
+    <div class="big">60 / 25,600</div>
+    <div class="label">dirty blocks extracted</div>
+  </div>
+  <div class="result-box" style="flex:1;min-width:200px;">
+    <div class="big">1,920 KB</div>
+    <div class="label">differential backup size</div>
+  </div>
+  <div class="result-box" style="flex:1;min-width:200px;">
+    <div class="big">99.8%</div>
+    <div class="label">data reduction</div>
+  </div>
+</div>
+
+<div class="callout">
+<strong>Zero downtime confirmed.</strong> During the entire differential backup (snapshot + dump + extract), the dm-era device remained live and accepted writes without interruption.
+</div>
+
+<h2>Dirty Block Breakdown</h2>
+
+<table>
+<tr><th>Blocks</th><th>Era</th><th>Written at</th><th>In full backup?</th><th>In diff?</th></tr>
+<tr><td>50-59</td><td class="num">3</td><td>t3 (writes B)</td><td style="color:var(--green)">Yes (redundant)</td><td>Yes</td></tr>
+<tr><td>300-309</td><td class="num">3</td><td>t5 (writes C)</td><td style="color:var(--red)">No</td><td>Yes</td></tr>
+<tr><td>0-4</td><td class="num">4</td><td>t7 (writes D)</td><td style="color:var(--red)">No</td><td>Yes</td></tr>
+<tr><td>200-219</td><td class="num">4</td><td>t7 (writes D)</td><td style="color:var(--red)">No</td><td>Yes</td></tr>
+<tr><td>5-9</td><td class="num">5</td><td>t9 (writes E)</td><td style="color:var(--red)">No</td><td>Yes</td></tr>
+<tr><td>500-509</td><td class="num">5</td><td>t9 (writes E)</td><td style="color:var(--red)">No</td><td>Yes</td></tr>
+</table>
+
+<p>Blocks 50-59 (writes B) are the "overlap" &mdash; they're in both the full backup and the differential. This is the cost of not aligning checkpoints to backup times. In practice, with hourly checkpoints, the overlap is at most one era's worth of writes.</p>
+
+<h2>Why This Works Without Timing Coordination</h2>
+
+<p>The traditional approach to change tracking requires you to "start tracking" at the exact moment of your full backup. Miss the window and you either lose changes or have to rescan.</p>
+
+<p>dm-era is different. It's <em>always</em> tracking, at era granularity. When you decide to take a full backup, you just note the current era. When you want a diff, you ask for all blocks written in that era or later. The eras don't need to line up with your backups.</p>
+
+<p>This means:</p>
+<ul style="margin: 0 0 16px 24px;">
+<li>Checkpoints can run on a fixed cron schedule</li>
+<li>Backups can happen at arbitrary times</li>
+<li>The only coordination needed: read one integer (current era) at full backup time</li>
+<li>Worst case: one era of redundant data in the diff (blocks already in the full backup)</li>
+</ul>
+
+<footer>
+  Tested on Linux 6.8.0-rc3 (dm-6.8 branch) in a QEMU VM with LVM snapshots.
+  Era block size: 64 sectors (32KB). Origin: 800MB. Metadata: 32MB.
+</footer>
+
+</div>
+
+<script>
+// ============================================================
+// Block map visualization
+// ============================================================
+const COLS = 80;
+const ROWS = 10; // 800 blocks
+const CELL = 8;
+const GAP = 1;
+
+// Era data for each block (0-799)
+// era=0: never written, era=2: writes A(t1), era=3: writes B(t3)+C(t5), era=4: writes D(t7), era=5: writes E(t9)
+const eraMap = new Array(800).fill(0);
+// Phase data: cumulative state at each timeline point
+const phases = [];
+
+// t1: writes A - blocks 0-99, 400-449, 700-749 -> era 2
+function applyT1(m) { for(let i=0;i<100;i++) m[i]=2; for(let i=400;i<450;i++) m[i]=2; for(let i=700;i<750;i++) m[i]=2; }
+// t3: writes B - blocks 50-59 -> era 3
+function applyT3(m) { for(let i=50;i<60;i++) m[i]=3; }
+// t5: writes C - blocks 300-309 -> era 3
+function applyT5(m) { for(let i=300;i<310;i++) m[i]=3; }
+// t7: writes D - blocks 0-4, 200-219 -> era 4
+function applyT7(m) { for(let i=0;i<5;i++) m[i]=4; for(let i=200;i<220;i++) m[i]=4; }
+// t9: writes E - blocks 5-9, 500-509 -> era 5
+function applyT9(m) { for(let i=5;i<10;i++) m[i]=5; for(let i=500;i<510;i++) m[i]=5; }
+
+function buildPhases() {
+  const names = [
+    't0: initial (all zeros)',
+    't1: writes A',
+    't3: writes B (before backup)',
+    't4: FULL BACKUP (era=3)',
+    't5: writes C (after backup!)',
+    't7: writes D',
+    't9: writes E',
+    't11: DIFF BACKUP (era>=3)'
+  ];
+  const fns = [null, applyT1, applyT3, null, applyT5, applyT7, applyT9, null];
+  let m = new Array(800).fill(0);
+  for (let i = 0; i < names.length; i++) {
+    if (fns[i]) fns[i](m);
+    phases.push({ name: names[i], data: [...m] });
+  }
+}
+buildPhases();
+
+const eraColors = {
+  0: '#1a1a1a',
+  2: '#1a5276',
+  3: '#7d3c98',
+  4: '#b9770e',
+  5: '#1e8449'
+};
+const eraLabels = {
+  0: 'unwritten',
+  2: 'era 2 (writes A)',
+  3: 'era 3 (writes B+C)',
+  4: 'era 4 (writes D)',
+  5: 'era 5 (writes E)'
+};
+
+// Highlight for diff backup
+const BACKUP_ERA = 3;
+
+let currentPhase = 0;
+const canvas = document.getElementById('blockmap');
+const ctx = canvas.getContext('2d');
+const W = COLS * (CELL + GAP) + GAP;
+const H = ROWS * (CELL + GAP) + GAP;
+canvas.width = W;
+canvas.height = H;
+canvas.style.width = W + 'px';
+canvas.style.height = H + 'px';
+
+function draw() {
+  const phase = phases[currentPhase];
+  const isDiff = currentPhase === phases.length - 1;
+  ctx.fillStyle = '#0c0c0c';
+  ctx.fillRect(0, 0, W, H);
+
+  for (let i = 0; i < 800; i++) {
+    const col = i % COLS;
+    const row = Math.floor(i / COLS);
+    const x = GAP + col * (CELL + GAP);
+    const y = GAP + row * (CELL + GAP);
+    const era = phase.data[i];
+
+    if (isDiff && era >= BACKUP_ERA) {
+      // Highlight dirty blocks in diff view
+      ctx.fillStyle = era === 3 ? '#c39bd3' : (era === 4 ? '#f0b27a' : '#58d68d');
+      ctx.fillRect(x, y, CELL, CELL);
+      // bright border
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x + 0.5, y + 0.5, CELL - 1, CELL - 1);
+    } else {
+      ctx.fillStyle = eraColors[era] || '#333';
+      ctx.fillRect(x, y, CELL, CELL);
+    }
+  }
+}
+
+// Controls
+const controls = document.getElementById('bm-controls');
+phases.forEach((p, i) => {
+  const btn = document.createElement('button');
+  btn.textContent = p.name.split(':')[0];
+  btn.title = p.name;
+  btn.onclick = () => { currentPhase = i; updateControls(); draw(); updateInfo(); };
+  controls.appendChild(btn);
+});
+
+function updateControls() {
+  const btns = controls.querySelectorAll('button');
+  btns.forEach((b, i) => b.classList.toggle('active', i === currentPhase));
+}
+
+function updateInfo() {
+  const phase = phases[currentPhase];
+  const info = document.getElementById('bm-info');
+  const written = phase.data.filter(e => e > 0).length;
+  const dirty = phase.data.filter(e => e >= BACKUP_ERA).length;
+  let text = `<strong>${phase.name}</strong> &mdash; ${written} blocks written`;
+  if (currentPhase === phases.length - 1) {
+    text += ` &mdash; <span style="color:var(--green)">${dirty} dirty blocks (era &ge; ${BACKUP_ERA})</span>`;
+  }
+  info.innerHTML = text;
+}
+
+// Hover
+canvas.addEventListener('mousemove', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  const col = Math.floor(x / (CELL + GAP));
+  const row = Math.floor(y / (CELL + GAP));
+  const block = row * COLS + col;
+  if (block >= 0 && block < 800) {
+    const era = phases[currentPhase].data[block];
+    const info = document.getElementById('bm-info');
+    const isDirty = era >= BACKUP_ERA;
+    let text = `Block ${block} (offset ${(block * 32)}KB) &mdash; era ${era}`;
+    if (era === 0) text += ' (unwritten)';
+    if (isDirty && currentPhase === phases.length - 1) text += ' <span style="color:var(--green)">DIRTY</span>';
+    info.innerHTML = text;
+  }
+});
+
+// Legend
+const legend = document.getElementById('bm-legend');
+Object.entries(eraLabels).forEach(([era, label]) => {
+  const span = document.createElement('span');
+  const swatch = document.createElement('span');
+  swatch.className = 'swatch';
+  swatch.style.background = eraColors[era];
+  span.appendChild(swatch);
+  span.appendChild(document.createTextNode(' ' + label));
+  legend.appendChild(span);
+});
+
+// Init
+updateControls();
+draw();
+updateInfo();
+</script>
+</body>
+</html>
