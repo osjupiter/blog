@@ -504,6 +504,26 @@ $ lvremove -f metavg/metasnap</code></pre>
 
 <p>The critical row is blocks 300-309 (writes C). These were written <em>after</em> the full backup but in the <em>same era</em>. By taking the diff from the BACKUP_ERA onwards, they're correctly captured without any timing coordination.</p>
 
+<h3>Integrity verification</h3>
+
+<p>The ultimate test: apply the differential backup on top of the full backup and compare the result against the snapshot taken at diff time. If they match byte-for-byte, no writes were lost.</p>
+
+<pre><code><span style="color:var(--fg2)"># Reconstruct: copy full backup, apply diff blocks on top</span>
+$ cp /backup/full.img /backup/reconstructed.img
+$ python3 apply_diff.py /backup/diff.bin /backup/reconstructed.img
+Applied 60 blocks from diff to full backup
+
+<span style="color:var(--fg2)"># Compare against the snapshot taken at diff time</span>
+$ md5sum /dev/datavg/datasnap
+544fb63b202fb3f0eac9f082b17754ac
+
+$ md5sum /backup/reconstructed.img
+544fb63b202fb3f0eac9f082b17754ac</code></pre>
+
+<div class="callout ok">
+<strong>Exact match.</strong> The full backup + differential produces a byte-identical copy of the device at the moment the differential snapshot was taken. No writes were missed, no data was corrupted.
+</div>
+
 
 <footer>
   Tested on Linux 6.8.0-rc3 (dm-6.8 branch) in a QEMU VM with LVM snapshots.
