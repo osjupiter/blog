@@ -410,9 +410,9 @@ diff diff-hash.txt diff-era.txt \
 <tr><td>ublkera <code>-q 4</code></td><td class="num">184k</td></tr>
 </table>
 
-<p>No contest, and worth stating plainly as a ublk limit: the in-kernel remap inherits every submitting CPU with no boundary crossing, while ublkera pays a uring_cmd round trip <em>and a memory copy through the per-tag buffer</em> for every request. Recent kernels do offer zero-copy modes for ublk, but they only remove the copy — a cost that scales with IO size — while this 4&nbsp;KiB gap comes mostly from the fixed per-request round trip, which stays. So ublkera keeps the simpler copy mode. Either way, against a real backing disk at tens of thousands of IOPS, this ceiling is never reached.</p>
+<p>No contest, and worth stating plainly as a ublk limit: the in-kernel remap inherits every submitting CPU with no boundary crossing, while ublkera pays a uring_cmd round trip <em>and a memory copy through the per-tag buffer</em> for every request. Either way, against a real backing disk at tens of thousands of IOPS, this ceiling is never reached.</p>
 
-<p>The honest trade: dm-era keeps the data path in the kernel and its metadata is crash-consistent; ublkera pays a userspace round trip per IO and treats its metadata as expendable — after an unclean shutdown the next diff is simply a full copy. In exchange you get one daemon managing N devices, runtime attach of plain files, JSON instead of XML, and change-tracking logic you can read, test, and extend like any normal program — the whole verification section above is just shell scripts against a unix socket.</p>
+<p>The trade fits in one line: <strong>dm-era is faster; ublkera trades that performance for change tracking that lives in userspace as an ordinary program</strong> — readable, testable, and easy to extend. This article's verification procedure and the volatile-metadata design are both products of that side of the trade.</p>
 
 <h2>Conclusion</h2>
 
