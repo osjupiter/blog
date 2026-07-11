@@ -78,6 +78,7 @@ PAGE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{site_title}</title>
 <meta name="description" content="{site_description}">
+<meta name="google-site-verification" content="dKigbZzDLch6rL1o7eUh-98cCvlEwuZ9z-53trMzxSE">
 <link rel="canonical" href="{base_url}">
 <meta property="og:site_name" content="osjupiter">
 <meta property="og:title" content="{site_title}">
