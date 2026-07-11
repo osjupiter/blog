@@ -82,8 +82,6 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 
 <p>ublk は Ming Lei によって書かれ、Linux 6.0(2022)に io_uring の pull request の中にひっそりと入ってマージされました(<a href="https://lwn.net/Articles/903855/">LWN の解説</a>)。掲げられた動機は、仮想ブロックドライバをカーネルの外に出すことです: loop、nbd 系のデバイス、そして何度も試みられてきた qcow2 のカーネルドライバ実装。ユーザ空間のブロックドライバなら、どんな言語でも書けて、どんなライブラリでもリンクできて、普通のプログラムとしてデバッグできて、クラッシュしてもマシンを道連れにしません。</p>
 
-<p>SPDK の親戚のように語られることもありますが、SPDK の派生ではありません — 関係はむしろ逆向きです。SPDK のようなユーザ空間ストレージスタックは NVMe-oF や vhost-user は喋れても、「ただの<em>ローカル</em>ブロックデバイス」として見せる正攻法を持っておらず、回避策は NBD の loopback か TCMU、どちらも io_uring 以前の設計の遅いパスでした。ublk はその欠けていた玄関口を io_uring ネイティブで作ったもので、いまでは SPDK 自身が <a href="https://spdk.io/doc/ublk.html">ublk ターゲット</a>を載せ、SPDK bdev をカーネルのブロックデバイスとして公開するのに使っています。</p>
-
 <h3>リクエストがユーザ空間に届くまで</h3>
 
 <p>制御もデータも io_uring に乗っています。制御プレーンは misc デバイス <code>/dev/ublk-control</code> で、サーバが <code>ADD_DEV</code>(キュー数・深さ・バッファサイズを交渉)を送ると、デバイスごとのキャラクタデバイス <code>/dev/ublkcN</code> — データプレーンのチャネル — が生まれます。サーバはリクエストディスクリプタ配列を mmap してデータプレーンを準備し、<code>START_DEV</code> を送る。実際のブロックデバイス <code>/dev/ublkbN</code> が現れるのはこの時点です。</p>
@@ -206,6 +204,15 @@ diff diff-hash.txt diff-era.txt \
 <p>ublkera のスレッド構成は ublk の自然な形に従っています: デバイス1個につき supervisor スレッド1本、その下に <strong>HW キュー1本につき専用の IO スレッド + io_uring</strong>。デバイス間で共有する実行資源はなく、era の刻印も完了ごとのアトミック演算1回だけなので、複数デバイスは何の調整もなしに複数コアへ散ります。</p>
 
 <p>ただし1デバイスの中では、既定はキュー1本 — データパスのユーザ空間側が1スレッドに直列化され、ホットなデバイスはおよそ1コアを張り付かせます。最初は「ublk の限界か」と思いましたが、違いました: ublk デバイスは <code>nr_hw_queues</code> パラメータ付きで作成でき、blk-mq が発行元 CPU をキューに割り当て、キューごとにサーバスレッドが立ちます。手を伸ばせば届くデフォルトです(ublkera では <code>add -q 4</code>)。</p>
+
+<pre><code> nr_hw_queues = 1 (既定)              nr_hw_queues = 4
+                                      CPU0 ──► q0 ──► スレッド0 + ring
+ CPU0 ─┐                              CPU1 ──► q1 ──► スレッド1 + ring
+ CPU1 ─┼──► q0 ──► スレッド0 + ring   CPU2 ──► q2 ──► スレッド2 + ring
+ CPU2 ─┤    (ユーザ空間側は           CPU3 ──► q3 ──► スレッド3 + ring
+ CPU3 ─┘     最大 ~1 コア)                (CPU に合わせてファンアウト)</code></pre>
+
+<p>正確に言えば、キュースレッドが CPU に 1:1 で固定されるわけではありません — スケジューラは自由にスレッドを移動できます。これはキャパシティの話です: 1本のスレッドが燃やせるのは最大1コアなので、キュー1本は1デバイスのユーザ空間側を CPU 約100% で頭打ちにします。忙しい発行元 CPU の数だけキューを与えれば、この頭打ちは消えます。</p>
 
 <p>4 vCPU の QEMU ゲスト、バッキングは tmpfs(律速がディスクでなく RAM になるように)、fio 4k randread <code>direct=1</code> での実測:</p>
 

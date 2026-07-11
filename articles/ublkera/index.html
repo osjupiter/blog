@@ -81,8 +81,6 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 
 <p>ublk was written by Ming Lei and merged in Linux 6.0 (2022), arriving quietly inside an io_uring pull request (<a href="https://lwn.net/Articles/903855/">LWN covered it</a>). The stated motivation was to move virtual block drivers out of the kernel: loop, nbd-style devices, and the long line of attempts to implement qcow2 as a kernel driver. A userspace block driver can be written in any language, link any library, be debugged like a normal program, and crash without taking the machine down.</p>
 
-<p>It's sometimes filed mentally next to SPDK, but it is not an SPDK derivative — the relationship runs the other way. Userspace storage stacks like SPDK could already serve NVMe-oF or vhost-user, but had no first-class way to show up as a plain <em>local</em> block device; the workarounds were NBD over loopback or TCMU, both slow paths with pre-io_uring designs. ublk is that missing front door, built natively on io_uring — and SPDK itself now ships a <a href="https://spdk.io/doc/ublk.html">ublk target</a> that uses it to expose SPDK bdevs as kernel block devices.</p>
-
 <h3>How a request reaches userspace</h3>
 
 <p>Both planes ride on io_uring. Control is a misc device, <code>/dev/ublk-control</code>: the server sends <code>ADD_DEV</code> (negotiating queue count, depth, buffer size), which creates a per-device char device <code>/dev/ublkcN</code> — the data-plane channel. The server mmaps the request-descriptor array, arms the data plane, then sends <code>START_DEV</code>; only at that point does the actual block device <code>/dev/ublkbN</code> appear.</p>
@@ -205,6 +203,15 @@ diff diff-hash.txt diff-era.txt \
 <p>ublkera's threading follows ublk's natural shape: one supervisor thread per device, and under it <strong>one dedicated IO thread + io_uring per hardware queue</strong>. Devices share no execution resources, and era stamping is a single atomic per completion, so multiple devices spread across cores with no coordination at all.</p>
 
 <p>Within one device, though, the default is one queue — so the userspace half of the data path serializes on one thread, and a hot device pegs roughly one core. My first instinct was "ublk limitation." It isn't: ublk devices are created with an <code>nr_hw_queues</code> parameter, blk-mq maps submitting CPUs onto queues, and each queue gets its own server thread. It's just a default you have to reach for (<code>add -q 4</code> in ublkera).</p>
+
+<pre><code> nr_hw_queues = 1 (default)           nr_hw_queues = 4
+                                      CPU0 ──► q0 ──► thread 0 + ring
+ CPU0 ─┐                              CPU1 ──► q1 ──► thread 1 + ring
+ CPU1 ─┼──► q0 ──► thread 0 + ring    CPU2 ──► q2 ──► thread 2 + ring
+ CPU2 ─┤     (userspace side          CPU3 ──► q3 ──► thread 3 + ring
+ CPU3 ─┘      caps at ~1 core)             (fans out with the CPUs)</code></pre>
+
+<p>To be precise, a queue thread is not pinned 1:1 to a CPU — the scheduler is free to migrate it. The statement is about capacity: one thread can burn at most one core, so one queue caps the userspace side of one device at ~100% CPU. Give the device as many queues as there are busy submitting CPUs and the cap disappears.</p>
 
 <p>Measured on a 4-vCPU QEMU guest, backing file on tmpfs (so RAM speed, not disk, is the ceiling), fio 4k randread with <code>direct=1</code>:</p>
 
