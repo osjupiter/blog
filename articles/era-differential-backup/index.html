@@ -4,6 +4,26 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Zero-Downtime Differential Backup with dm-era + LVM Snapshots</title>
+<meta name="description" content="Using the kernel's dirty block tracker to copy only what changed, without stopping the device.">
+<link rel="canonical" href="https://osjupiter.github.io/blog/articles/era-differential-backup/">
+<meta property="og:site_name" content="osjupiter">
+<meta property="og:title" content="Zero-Downtime Differential Backup with dm-era + LVM Snapshots">
+<meta property="og:description" content="Using the kernel's dirty block tracker to copy only what changed, without stopping the device.">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://osjupiter.github.io/blog/articles/era-differential-backup/">
+<meta name="twitter:card" content="summary">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Zero-Downtime Differential Backup with dm-era + LVM Snapshots",
+  "description": "Using the kernel's dirty block tracker to copy only what changed, without stopping the device.",
+  "url": "https://osjupiter.github.io/blog/articles/era-differential-backup/",
+  "datePublished": "2026-04-12",
+  "dateModified": "2026-04-12",
+  "author": {"@type": "Person", "name": "osjupiter", "url": "https://github.com/osjupiter"}
+}
+</script>
 <style>
 :root {
   --bg: #0c0c0c;
