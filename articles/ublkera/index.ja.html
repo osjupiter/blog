@@ -147,7 +147,7 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 <ul style="margin: 0 0 16px 24px;">
 <li>metadata デバイスの扱い。dm-era は専用の永続 metadata デバイスを要求し、「永続化しない」という選択肢がない。差分バックアップ用途ではメタデータは最悪消えてもいい(消えたらフルを取り直せばいい)はずなのに、それをやるには metadata LV を tmpfs や brd に載せるようなハックになるし、metadata が壊れたときのターゲットの組み立て失敗も運用で背負うことになる。</li>
 <li>トラッキング対象1つごとに <code>dmsetup</code> のスタックを手で組む必要がある — origin、metadata LV、セクタ数入りのテーブル行。対象が10個あればそういうスタックが10本で、まとめて面倒を見てくれるものは何もない。</li>
-<li>dirty map の読み出しがクエリ1発ではない: metadata LV をスナップショットし、それに対して <code>era_dump</code> を実行し、XML をパースする。</li>
+<li>dirty map の読み出しがクエリ1発ではない: metadata LV をスナップショットし、それに対して <code>era_dump</code> を実行し、XML をパースする。スナップショットが要るのは、カーネルが更新し続けるオンディスクのメタデータ構造を、協調手段を持たない別プロセスのツールが直接読む構図だから — 「マップの持ち主に問い合わせる」インターフェースが存在しない。</li>
 </ul>
 
 <p>本当に欲しかったのは、dm-era にはない運用の形です: <strong>常駐プロセス1つが、任意の数のブロックデバイスのチェンジトラッキングを面倒見る</strong> — 実行中に attach/detach でき、制御ソケットは1本、答えは JSON で返る。そしてメタデータは「最悪消えてもいいもの」として扱えること。</p>
@@ -168,7 +168,7 @@ $ sudo ublkera checkpoint -f /data/a.img       # era 1 を閉じる。以降の�
 $ sudo ublkera dump -f /data/a.img --since 1   # その checkpoint 以降に書かれたバイトレンジ
 {"ok":true,"ranges":[{"offset":33554432,"len":65536}],"dirty_bytes":65536}</code></pre>
 
-<p><code>ranges</code> をデバイス(またはそのスナップショット)から読めば差分バックアップになります。運用モデルは dm-era と同じで、控えるのは整数1個。XML も metadata LV も dmsetup テーブルもありません。</p>
+<p><code>ranges</code> をデバイス(またはそのスナップショット)から読めば差分バックアップになります。運用モデルは dm-era と同じで、控えるのは整数1個。XML も metadata LV も dmsetup テーブルもありません。マップを読むためのスナップショットも不要です — マップの持ち主であるデーモン自身がクエリに答えるからです。</p>
 
 <h2>トラッキングの仕組み</h2>
 

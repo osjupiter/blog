@@ -146,7 +146,7 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 <ul style="margin: 0 0 16px 24px;">
 <li>The metadata device. dm-era demands a dedicated, persistent metadata device and has no "don't persist" option. For differential backup the metadata is allowed to die — worst case you take a fresh full copy — but getting that behavior means hacks like backing the metadata LV with tmpfs or brd, and you still own the failure mode of a corrupted metadata device at assemble time.</li>
 <li>Every tracked device is a <code>dmsetup</code> stack assembled by hand — an origin, a metadata LV, a table line with sector counts. Track ten devices and you have ten stacks, with nothing managing them as a group.</li>
-<li>Reading the dirty map is not one query: snapshot the metadata LV, run <code>era_dump</code> against the snapshot, parse the XML.</li>
+<li>Reading the dirty map is not one query: snapshot the metadata LV, run <code>era_dump</code> against the snapshot, parse the XML. The snapshot is needed because a separate userspace tool is reading an on-disk structure the kernel keeps mutating, with no way to coordinate — there is no interface for asking the map's owner directly.</li>
 </ul>
 
 <p>What I actually wanted was an operational shape dm-era doesn't have: <strong>one resident process supervising change tracking for any number of block devices</strong> — attach and detach at runtime, one control socket, answers in JSON. And metadata treated as something that is allowed to simply vanish.</p>
@@ -167,7 +167,7 @@ $ sudo ublkera checkpoint -f /data/a.img       # close era 1, writes now stamp e
 $ sudo ublkera dump -f /data/a.img --since 1   # byte ranges written since that checkpoint
 {"ok":true,"ranges":[{"offset":33554432,"len":65536}],"dirty_bytes":65536}</code></pre>
 
-<p>Read the <code>ranges</code> from the device (or a snapshot of it), and you have your differential backup — same operational model as dm-era, one integer of bookkeeping, no XML, no metadata LV, no dmsetup tables.</p>
+<p>Read the <code>ranges</code> from the device (or a snapshot of it), and you have your differential backup — same operational model as dm-era, one integer of bookkeeping, no XML, no metadata LV, no dmsetup tables. And no snapshot just to read the map — the daemon that owns it answers the query itself.</p>
 
 <h2>How the tracking works</h2>
 
