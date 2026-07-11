@@ -144,10 +144,11 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 <p>In <a href="../era-differential-backup/">a previous article</a> I used <code>dm-era</code> — the kernel's device-mapper target that tracks which blocks were written in which "era" — to do zero-downtime differential backups. It works, and I still like it. But living with it for a while left a list of ergonomic complaints:</p>
 
 <ul style="margin: 0 0 16px 24px;">
-<li>Every tracked device is a <code>dmsetup</code> stack you have to assemble by hand: an origin, a separate metadata LV, a table line with sector counts.</li>
-<li>Reading the dirty map means snapshotting the metadata volume and running <code>era_dump</code>, which emits XML you then have to parse.</li>
-<li>Adding tracking to a plain disk image file — not an LV, just a file — means wrapping it in a loop device first.</li>
+<li>Every tracked device is a <code>dmsetup</code> stack assembled by hand — an origin, a separate metadata LV, a table line with sector counts. Track ten devices and you have ten stacks, with nothing managing them as a group.</li>
+<li>Reading the dirty map is not one query: snapshot the metadata LV, run <code>era_dump</code> against the snapshot, parse the XML. (Running a dump tool is table stakes for any tracker — the friction is the snapshot choreography around it, and the output format.)</li>
 </ul>
+
+<p>What I actually wanted was an operational shape dm-era doesn't have: <strong>one resident process supervising change tracking for any number of block devices</strong> — attach and detach at runtime, one control socket, answers in JSON.</p>
 
 <p>Look back at the ublk request loop above and the fix suggests itself: every write already passes through my process, so tracking dirty blocks is just bookkeeping on the side. ublkera is that idea as a single resident daemon — it exposes backing files or block devices as ublk devices, passes IO through 1:1, and records which chunks were written in which era, dm-era style. In Rust, on top of the <code>libublk</code> crate.</p>
 
@@ -161,8 +162,8 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 <pre><code>$ sudo ublkera add -f /data/a.img --meta /var/lib/ublkera/a.meta
 {"ok":true,"dev_id":0,"bdev":"/dev/ublkb0","granularity":65536,"current_era":1}
 
-$ sudo ublkera checkpoint -n 0          # close era 1, writes now stamp era 2
-$ sudo ublkera dump -n 0 --since 1      # byte ranges written since that checkpoint
+$ sudo ublkera checkpoint -f /data/a.img       # close era 1, writes now stamp era 2
+$ sudo ublkera dump -f /data/a.img --since 1   # byte ranges written since that checkpoint
 {"ok":true,"ranges":[{"offset":33554432,"len":65536}],"dirty_bytes":65536}</code></pre>
 
 <p>Read the <code>ranges</code> from the device (or a snapshot of it), and you have your differential backup — same operational model as dm-era, one integer of bookkeeping, no XML, no metadata LV, no dmsetup tables.</p>
@@ -236,11 +237,11 @@ diff diff-hash.txt diff-era.txt \
 
 <p>The surprise in the middle column: past ~1.25&nbsp;MiB you hit a <em>different</em> limit — the block layer's soft cap <code>max_sectors_kb</code>, which defaults to 1280&nbsp;KiB for every block device, ublk or not. The hardware ceiling keeps growing with your buffer; the effective request size doesn't, unless you also raise the soft cap via sysfs (<code>echo N &gt; /sys/block/ublkbN/queue/max_sectors_kb</code>). Two knobs, two owners.</p>
 
-<h3>2. "One device ≈ one core" is a default, not a limit</h3>
+<h3>2. One IO thread per queue — how ublk spends your cores</h3>
 
-<p>ublkera's threading follows ublk's natural shape: one supervisor thread per device, and under it <strong>one dedicated IO thread + io_uring per hardware queue</strong>. Devices share no execution resources, and era stamping is a single atomic per completion, so multiple devices spread across cores with no coordination at all.</p>
+<p>ublk runs <strong>one dedicated IO thread (with its own io_uring) per queue</strong>, and ublkera gives every device its own. Run several devices and the work is inherently spread across cores: devices share no execution resources — era stamping is one atomic operation per completion — so apart from the CPUs themselves and the kernel's own work, devices never contend with each other.</p>
 
-<p>Within one device, though, the default is one queue — so the userspace half of the data path serializes on one thread, and a hot device pegs roughly one core. My first instinct was "ublk limitation." It isn't: ublk devices are created with an <code>nr_hw_queues</code> parameter, blk-mq maps submitting CPUs onto queues, and each queue gets its own server thread. It's just a default you have to reach for (<code>add -q 4</code> in ublkera).</p>
+<p>A single device can also be served by multiple threads: create it with several queues (ublk's <code>nr_hw_queues</code>; <code>add -q N</code> in ublkera) and each queue gets its own thread, with blk-mq mapping submitting CPUs onto queues. The default is one queue, which serializes the userspace side of that device onto one thread — at most about one core. If a hot device is CPU-bound, queues are the knob.</p>
 
 <p>Two independent knobs are in play here, and they scale different things. <strong>Depth</strong> is the number of tag slots per queue — how many commands can be in flight at once on one thread. <strong>Queue count</strong> is the number of threads — how much CPU can serve the device:</p>
 
@@ -406,7 +407,7 @@ write(2, "\nthread 'ublkera-dev-/root/cbt-t"..., 203) = -1 EIO</code></pre>
 
 <p>ublk turns "I wish the kernel tracked this for me" into "I'll track it myself, it's my process anyway." The passthrough-plus-bookkeeping pattern is a genuinely small program — the era map is an array of atomics and two rules (stamp on completion, stamp with max) — and the parts that took real effort were exactly the parts that always do: verification methodology, threading defaults, and a daemon lifecycle bug older than ublk itself.</p>
 
-<p>Performance-wise, the userspace hop is not the bottleneck at backup-tool scale: one queue thread moves ~50k 4k IOPS on modest virtual hardware, queues scale it linearly across cores, and sequential IO passes through at full request size. If you need dm-era semantics on things dm-era is awkward about — plain image files, devices that come and go, fleets managed by one supervisor — building on ublk is a very reasonable place to stand.</p>
+<p>Performance-wise, the userspace hop is not the bottleneck at backup-tool scale: one queue thread moves ~50k 4k IOPS on modest virtual hardware, queues scale it linearly across cores, and sequential IO passes through at full request size. If you need dm-era semantics in shapes dm-era is awkward about — devices that come and go, a fleet of them managed by one supervisor — building on ublk is a very reasonable place to stand.</p>
 
 <footer>
   Tested on Ubuntu 24.04 (guest kernel 6.8, QEMU/KVM, 4 vCPU) with fio 3.36.
