@@ -363,12 +363,6 @@ diff diff-hash.txt diff-era.txt \
      4100    3.38   50.12   53.50    2  |__ublkera-dev-/de
      4101    3.75   49.38   53.12    3  |__ublkera-dev-/de</code></pre>
 
-<h3>3. cloud イメージのカーネルに ublk_drv は入っていない</h3>
-
-<p>小さいけれど時間を食った話: Ubuntu の cloud イメージには <code>ublk_drv.ko</code> が入っていません — <code>linux-modules-extra</code> に入っていて、cloud 向けカーネルフレーバーはそれを引き込まないのです。cloud イメージから作ったテスト VM では、<code>apt install linux-modules-extra-$(uname -r)</code> するまで <code>modprobe ublk_drv</code> が失敗します。cloud-init に焼き込んで忘れましょう。</p>
-
-<p>プロジェクトには最終的に QEMU ベースのテスト環境が2つでき、どちらもホスト root 不要です: CI 的なチェック用の <strong>busybox initramfs VM</strong>(ホストカーネル + デーモンバイナリ + <code>ublk_drv.ko</code> だけで数秒で起動し E2E 一式を実行)と、対話的にいじるための <strong>Ubuntu cloud イメージのフル VM</strong>(上記のモジュール対策込みで cloud-init がプロビジョニング)。実ブロックデバイスはどこかで root が要ります — VM ならその「どこか」を使い捨てにできます。</p>
-
 <h2>dm-era vs ublkera</h2>
 
 <table>

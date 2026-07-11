@@ -362,12 +362,6 @@ diff diff-hash.txt diff-era.txt \
      4100    3.38   50.12   53.50    2  |__ublkera-dev-/de
      4101    3.75   49.38   53.12    3  |__ublkera-dev-/de</code></pre>
 
-<h3>3. Cloud kernels don't ship ublk_drv</h3>
-
-<p>Small but time-consuming: Ubuntu cloud images don't include <code>ublk_drv.ko</code> — it lives in <code>linux-modules-extra</code>, which the cloud kernel flavor doesn't pull in. If your test VM is built from a cloud image, <code>modprobe ublk_drv</code> fails until you <code>apt install linux-modules-extra-$(uname -r)</code>. Bake it into cloud-init and forget about it.</p>
-
-<p>The project ended up with two QEMU-based test rigs, both rootless on the host: a <strong>busybox initramfs VM</strong> (host kernel + the daemon binary + <code>ublk_drv.ko</code>, boots and runs the full E2E suite in seconds) for CI-style checks, and a <strong>full Ubuntu cloud-image VM</strong> for interactive poking, provisioned by cloud-init with the module fix above. Real block devices need root somewhere; a VM keeps "somewhere" disposable.</p>
-
 <h2>dm-era vs ublkera</h2>
 
 <table>
