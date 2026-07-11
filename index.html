@@ -30,10 +30,12 @@ h1 .prompt { color: var(--accent); }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 .article { display: block; background: var(--bg2); border: 1px solid #222; border-radius: 6px; padding: 20px 24px; margin-bottom: 20px; transition: border-color 0.15s; }
-.article:hover { border-color: var(--accent); text-decoration: none; }
-.article h2 { font-size: 1.15em; color: #eee; margin-bottom: 6px; }
+.article:hover { border-color: var(--accent); }
+.article h2 { font-size: 1.15em; margin-bottom: 6px; }
+.article h2 a { color: #eee; }
 .article p { color: var(--fg2); font-size: 0.95em; margin-bottom: 10px; }
 .article .meta { color: #555; font-size: 0.8em; font-family: 'JetBrains Mono', 'Fira Code', monospace; }
+.article .meta a { color: #888; }
 footer { margin-top: 64px; color: #555; font-size: 0.85em; border-top: 1px solid #222; padding-top: 16px; }
 </style>
 </head>
@@ -41,16 +43,16 @@ footer { margin-top: 64px; color: #555; font-size: 0.85em; border-top: 1px solid
 <div class="container">
 <h1><span class="prompt">$</span> osjupiter</h1>
 <p class="tagline">Notes on storage, kernels, and things measured rather than assumed.</p>
-<a class="article" href="articles/era-differential-backup/">
-<h2>Zero-Downtime Differential Backup with dm-era + LVM Snapshots</h2>
+<div class="article">
+<h2><a href="articles/era-differential-backup/">Zero-Downtime Differential Backup with dm-era + LVM Snapshots</a></h2>
 <p>Using the kernel&#x27;s dirty block tracker to copy only what changed, without stopping the device.</p>
-<div class="meta">2026-04-12 (updated 2026-07-11)</div>
-</a>
-<a class="article" href="articles/block-trace-viz/">
-<h2>Visualizing Linux Block I/O: How LVM, ZFS, and Btrfs Actually Write to Disk</h2>
+<div class="meta">2026-04-12 (updated 2026-07-11) · <a href="articles/era-differential-backup/index.ja.html">日本語</a></div>
+</div>
+<div class="article">
+<h2><a href="articles/block-trace-viz/">Visualizing Linux Block I/O: How LVM, ZFS, and Btrfs Actually Write to Disk</a></h2>
 <p>Animated blktrace visualizations showing write amplification, COW behavior, and snapshot overhead across storage stacks.</p>
-<div class="meta">2026-04-05 (updated 2026-07-11)</div>
-</a>
+<div class="meta">2026-04-05 (updated 2026-07-11) · <a href="articles/block-trace-viz/index.ja.html">日本語</a></div>
+</div>
 <footer><a href="https://github.com/osjupiter">github.com/osjupiter</a></footer>
 </div>
 </body>

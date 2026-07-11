@@ -62,6 +62,7 @@ def collect_articles() -> list[dict]:
         published, updated = git_dates(index.parent)
         articles.append({
             "slug": index.parent.name,
+            "has_ja": (index.parent / "index.ja.html").exists(),
             "title": title_m.group(1).strip() if title_m else index.parent.name,
             "subtitle": re.sub(r"<[^>]+>", "", subtitle_m.group(1)).strip() if subtitle_m else "",
             "published": published,
@@ -103,10 +104,12 @@ h1 .prompt {{ color: var(--accent); }}
 a {{ color: var(--accent); text-decoration: none; }}
 a:hover {{ text-decoration: underline; }}
 .article {{ display: block; background: var(--bg2); border: 1px solid #222; border-radius: 6px; padding: 20px 24px; margin-bottom: 20px; transition: border-color 0.15s; }}
-.article:hover {{ border-color: var(--accent); text-decoration: none; }}
-.article h2 {{ font-size: 1.15em; color: #eee; margin-bottom: 6px; }}
+.article:hover {{ border-color: var(--accent); }}
+.article h2 {{ font-size: 1.15em; margin-bottom: 6px; }}
+.article h2 a {{ color: #eee; }}
 .article p {{ color: var(--fg2); font-size: 0.95em; margin-bottom: 10px; }}
 .article .meta {{ color: #555; font-size: 0.8em; font-family: 'JetBrains Mono', 'Fira Code', monospace; }}
+.article .meta a {{ color: #888; }}
 footer {{ margin-top: 64px; color: #555; font-size: 0.85em; border-top: 1px solid #222; padding-top: 16px; }}
 </style>
 </head>
@@ -121,16 +124,19 @@ footer {{ margin-top: 64px; color: #555; font-size: 0.85em; border-top: 1px soli
 </html>
 """
 
-ITEM = """<a class="article" href="articles/{slug}/">
-<h2>{title}</h2>
+ITEM = """<div class="article">
+<h2><a href="articles/{slug}/">{title}</a></h2>
 <p>{subtitle}</p>
-<div class="meta">{dates}</div>
-</a>"""
+<div class="meta">{dates}{ja_link}</div>
+</div>"""
 
 
 def write_sitemap(articles: list[dict]) -> None:
     urls = [(BASE_URL, max((a["updated"] for a in articles), default=""))]
-    urls += [(f"{BASE_URL}articles/{a['slug']}/", a["updated"]) for a in articles]
+    for a in articles:
+        urls.append((f"{BASE_URL}articles/{a['slug']}/", a["updated"]))
+        if a["has_ja"]:
+            urls.append((f"{BASE_URL}articles/{a['slug']}/index.ja.html", a["updated"]))
     entries = "\n".join(
         f"<url><loc>{html.escape(loc)}</loc>"
         + (f"<lastmod>{lastmod}</lastmod>" if lastmod else "")
@@ -152,11 +158,16 @@ def main() -> None:
         dates = a["published"]
         if a["updated"] and a["updated"] != a["published"]:
             dates += f" (updated {a['updated']})"
+        ja_link = ""
+        if a["has_ja"]:
+            ja_link = (f' · <a href="articles/{html.escape(a["slug"], quote=True)}'
+                       '/index.ja.html">日本語</a>')
         items.append(ITEM.format(
             slug=html.escape(a["slug"], quote=True),
             title=html.escape(a["title"]),
             subtitle=html.escape(a["subtitle"]),
             dates=html.escape(dates),
+            ja_link=ja_link,
         ))
     OUTPUT.write_text(PAGE.format(
         items="\n".join(items),

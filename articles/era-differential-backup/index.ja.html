@@ -1,27 +1,28 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ja">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Zero-Downtime Differential Backup with dm-era + LVM Snapshots</title>
-<meta name="description" content="Using the kernel's dirty block tracker to copy only what changed, without stopping the device.">
-<link rel="canonical" href="https://osjupiter.github.io/blog/articles/era-differential-backup/">
+<title>dm-era + LVM スナップショットで実現する無停止の差分バックアップ</title>
+<meta name="description" content="カーネルの dirty block トラッカーを使い、デバイスを止めずに変更されたブロックだけをコピーします。">
+<link rel="canonical" href="https://osjupiter.github.io/blog/articles/era-differential-backup/index.ja.html">
 <link rel="alternate" hreflang="en" href="https://osjupiter.github.io/blog/articles/era-differential-backup/">
 <link rel="alternate" hreflang="ja" href="https://osjupiter.github.io/blog/articles/era-differential-backup/index.ja.html">
 <link rel="alternate" hreflang="x-default" href="https://osjupiter.github.io/blog/articles/era-differential-backup/">
 <meta property="og:site_name" content="osjupiter">
-<meta property="og:title" content="Zero-Downtime Differential Backup with dm-era + LVM Snapshots">
-<meta property="og:description" content="Using the kernel's dirty block tracker to copy only what changed, without stopping the device.">
+<meta property="og:title" content="dm-era + LVM スナップショットで実現する無停止の差分バックアップ">
+<meta property="og:description" content="カーネルの dirty block トラッカーを使い、デバイスを止めずに変更されたブロックだけをコピーします。">
 <meta property="og:type" content="article">
-<meta property="og:url" content="https://osjupiter.github.io/blog/articles/era-differential-backup/">
+<meta property="og:url" content="https://osjupiter.github.io/blog/articles/era-differential-backup/index.ja.html">
 <meta name="twitter:card" content="summary">
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
   "@type": "TechArticle",
-  "headline": "Zero-Downtime Differential Backup with dm-era + LVM Snapshots",
-  "description": "Using the kernel's dirty block tracker to copy only what changed, without stopping the device.",
-  "url": "https://osjupiter.github.io/blog/articles/era-differential-backup/",
+  "headline": "dm-era + LVM スナップショットで実現する無停止の差分バックアップ",
+  "description": "カーネルの dirty block トラッカーを使い、デバイスを止めずに変更されたブロックだけをコピーします。",
+  "url": "https://osjupiter.github.io/blog/articles/era-differential-backup/index.ja.html",
+  "inLanguage": "ja",
   "datePublished": "2026-04-12",
   "dateModified": "2026-04-12",
   "author": {"@type": "Person", "name": "osjupiter", "url": "https://github.com/osjupiter"}
@@ -134,30 +135,30 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 </head>
 <body>
 <div class="container">
-<div class="lang-switch"><strong>EN</strong> · <a href="index.ja.html">日本語</a></div>
+<div class="lang-switch"><a href="./">EN</a> · <strong>日本語</strong></div>
 
-<h1>Zero-Downtime Differential Backup with dm-era + LVM Snapshots</h1>
-<p class="subtitle">Using the kernel's dirty block tracker to copy only what changed, without stopping the device.</p>
+<h1>dm-era + LVM スナップショットで実現する無停止の差分バックアップ</h1>
+<p class="subtitle">カーネルの dirty block トラッカーを使い、デバイスを止めずに変更されたブロックだけをコピーします。</p>
 
-<h2>What is dm-era?</h2>
+<h2>dm-era とは？</h2>
 
-<p><code>dm-era</code> is a <a href="https://docs.kernel.org/admin-guide/device-mapper/index.html">device-mapper</a> target in the Linux kernel. Device-mapper is the framework behind LVM, dm-crypt, and other block-level abstractions &mdash; it lets you stack virtual block devices on top of physical ones. <code>dm-era</code> is one such layer: it wraps an existing block device and maintains a <strong>dirty block map</strong>.</p>
+<p><code>dm-era</code> は Linux カーネルの <a href="https://docs.kernel.org/admin-guide/device-mapper/index.html">device-mapper</a> ターゲットの一つです。device-mapper は LVM や dm-crypt などブロックレベルの抽象化を支えるフレームワークで、物理デバイスの上に仮想ブロックデバイスを積み重ねられます。<code>dm-era</code> もそうしたレイヤーの一つで、既存のブロックデバイスをラップし、<strong>dirty block map（書き込み済みブロックの地図）</strong>を管理します。</p>
 
-<p>All reads and writes pass through to the underlying device unmodified. But internally, dm-era keeps a bitmap (writeset) of which blocks have been written. The <code>checkpoint</code> message closes the current bitmap and starts a fresh one under a new <strong>era</strong> number &mdash; a monotonically increasing counter, typically advanced on a cron. Each block remembers the era it was last written as. You can later ask: "give me all blocks last written in era N or later" &mdash; and dm-era returns exactly that list, without scanning the device.</p>
+<p>読み書きはすべてそのまま下位のデバイスに透過されます。ただし内部では、dm-era がどのブロックに書き込みがあったかをビットマップ（writeset）として記録しています。<code>checkpoint</code> メッセージを送ると現在のビットマップが閉じられ、新しい <strong>era</strong> 番号のもとで新しいビットマップが始まります。era は単調増加するカウンタで、通常は cron で定期的に進めます。各ブロックは最後に書き込まれた era を覚えているため、後から「era N 以降に書き込まれたブロックをすべて教えて」と問い合わせれば、デバイス全体をスキャンすることなく、その一覧だけが正確に返ってきます。</p>
 
-<p>This is the key capability for differential backups: if you record the current era at the time of a full backup, you can later extract exactly the blocks that changed since then.</p>
+<p>これこそが差分バックアップの鍵となる機能です。フルバックアップの時点の era を記録しておけば、その後「それ以降に変更されたブロックだけ」を正確に抽出できます。</p>
 
-<h3>Why dm-era over LVM thin + thin_delta?</h3>
+<h3>なぜ LVM thin + thin_delta ではなく dm-era なのか</h3>
 
-<p>LVM thin provisioning has <code>thin_delta</code>, which can diff two thin snapshots to find changed blocks. But it requires the device to be <strong>created as a thin volume from the start</strong>. If you have an existing device &mdash; a hardware RAID, an appliance-managed volume, a plain partition &mdash; you can't retroactively add thin provisioning without migrating all the data.</p>
+<p>LVM のシンプロビジョニングには <code>thin_delta</code> があり、2 つの thin スナップショットを比較して変更ブロックを求められます。しかしこれには、デバイスを<strong>最初から thin ボリュームとして作成しておく</strong>必要があります。既存のデバイス &mdash; ハードウェア RAID、アプライアンス管理のボリューム、素のパーティションなど &mdash; に対しては、全データを移行しない限り後からシンプロビジョニングを追加することはできません。</p>
 
-<p><code>dm-era</code> is different. It can be placed in front of <strong>any existing block device</strong>, at any time. All you need is a small metadata volume. The origin device doesn't need to be thin-provisioned, doesn't need to be LVM-managed, and doesn't need any special setup at creation time. (The origin does need some way to take a point-in-time snapshot for consistent reads during backup &mdash; LVM snapshots, storage array snapshots, etc. dm-era tells you <em>which</em> blocks to read; the snapshot gives you a frozen copy to read <em>from</em>.)</p>
+<p><code>dm-era</code> は違います。<strong>どんな既存のブロックデバイス</strong>の前段にも、いつでも配置できます。必要なのは小さな metadata ボリュームだけです。origin デバイスは thin である必要も、LVM 管理下にある必要もなく、作成時に特別な準備も要りません。（ただし origin 側には、バックアップ中に一貫した読み取りを行うためのポイントインタイムスナップショット手段 &mdash; LVM スナップショットやストレージアレイのスナップショットなど &mdash; は必要です。dm-era が教えてくれるのは<em>どの</em>ブロックを読むべきかで、スナップショットはそれを読み出す<em>ための</em>凍結されたコピーを提供します。）</p>
 
-<p>And since dm-era is a simple linear passthrough (not thin provisioning), there's no thin pool to manage &mdash; no pool sizing, no monitoring for pool exhaustion, no risk of the pool running full and freezing your writes. The metadata volume is tiny and fixed-size. I/O passes straight through with no indirection.</p>
+<p>さらに dm-era は単純なリニアなパススルーであり（シンプロビジョニングではないので）、管理すべき thin pool が存在しません。プールのサイズ設計も、プール枯渇の監視も、プールが満杯になって書き込みが凍結するリスクもありません。metadata ボリュームは小さな固定サイズで、I/O は間接参照なしにそのまま通過します。</p>
 
-<h2>The Architecture</h2>
+<h2>アーキテクチャ</h2>
 
-<p>dm-era wraps an existing block device (the "origin") and uses a small metadata device to track writes.</p>
+<p>dm-era は既存のブロックデバイス（「origin」）をラップし、小さな metadata デバイスを使って書き込みを追跡します。</p>
 
 <pre><code>              Reads/Writes
                   |
@@ -171,54 +172,54 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
      +-----------+ |   device)   |
                    +-------------+</code></pre>
 
-<p>The metadata device needs to be on LVM (or similar) so we can snapshot it for <code>era_dump</code>. The origin can be anything &mdash; LVM, hardware RAID, a plain partition &mdash; as long as it supports some form of point-in-time snapshot. Both are snapshotted independently during the differential backup, without ever stopping dm-era.</p>
+<p>metadata デバイスは <code>era_dump</code> 用にスナップショットを取れるよう、LVM（または同等の仕組み）の上に置く必要があります。origin は何でもかまいません &mdash; LVM、ハードウェア RAID、素のパーティション &mdash; 何らかのポイントインタイムスナップショットに対応していれば十分です。差分バックアップの際には両者を独立にスナップショットするだけで、dm-era を止めることは一切ありません。</p>
 
-<h2>How the Differential Backup Works</h2>
+<h2>差分バックアップの仕組み</h2>
 
-<p>The procedure has three phases:</p>
+<p>手順は 3 つのフェーズからなります。</p>
 
-<h3>Normal operation</h3>
-<p>Periodic checkpoints advance the era counter on a cron (e.g., hourly). Writes flow through dm-era normally &mdash; it just quietly records which blocks are dirty in each era.</p>
+<h3>通常運用</h3>
+<p>cron による定期的な checkpoint（例：毎時）で era カウンタを進めます。書き込みは普段どおり dm-era を通過し、dm-era はどのブロックがどの era で dirty になったかを静かに記録し続けるだけです。</p>
 
-<h3>Full backup</h3>
-<p>Take a full backup of the device however you normally do. At the same time, read the current era number and save it alongside the backup. This is the only bookkeeping required &mdash; no era-to-timestamp table, just one integer:</p>
+<h3>フルバックアップ</h3>
+<p>普段の方法でデバイスのフルバックアップを取ります。同時に、その時点の era 番号を読み取ってバックアップと一緒に保存します。必要な記録はこれだけです &mdash; era とタイムスタンプの対応表などは不要で、整数を 1 つ保存するだけです。</p>
 <pre><code>$ BACKUP_ERA=$(dmsetup status eradev | awk '{print $6}')
 $ echo "$BACKUP_ERA" > /backup/last_full_era</code></pre>
 
-<h3>Differential backup</h3>
+<h3>差分バックアップ</h3>
 <ol style="margin: 0 0 16px 24px;">
-<li><strong>Snapshot</strong> the origin (for consistent reads) and the metadata (for <code>era_dump</code>).</li>
-<li><strong>Dump</strong> the dirty map from the metadata snapshot with <code>era_dump --logical</code>. This outputs an XML file mapping each block to the era it was last written in.</li>
-<li><strong>Filter</strong> for blocks with <code>era &ge; BACKUP_ERA</code> and read them from the origin snapshot.</li>
+<li>origin（一貫した読み取り用）と metadata（<code>era_dump</code> 用）をそれぞれ<strong>スナップショット</strong>します。</li>
+<li>metadata のスナップショットから <code>era_dump --logical</code> で dirty map を<strong>ダンプ</strong>します。各ブロックが最後に書き込まれた era を対応付けた XML ファイルが出力されます。</li>
+<li><code>era &ge; BACKUP_ERA</code> のブロックを<strong>フィルタ</strong>し、origin のスナップショットから読み出します。</li>
 </ol>
 
-<p>The device stays live throughout &mdash; no suspend, no freeze.</p>
+<p>この間、デバイスはずっと稼働したままです &mdash; suspend も freeze もありません。</p>
 
-<p>Using <code>&ge;</code> (not <code>&gt;</code>) is important: the full backup may happen in the middle of an era, so some writes in that same era occurred after the backup. Including the entire BACKUP_ERA means a few blocks are redundantly copied (they're already in the full backup), but <strong>no writes are ever missed</strong>. The overlap is bounded by one era's worth of writes &mdash; with hourly checkpoints, it's negligible.</p>
+<p><code>&gt;</code> ではなく <code>&ge;</code> を使うのが重要なポイントです。フルバックアップは era の途中で実行されることがあるため、同じ era 内の書き込みの一部はバックアップ後に発生している可能性があります。BACKUP_ERA 全体を含めることで、少数のブロックは冗長にコピーされます（すでにフルバックアップに含まれているため）が、<strong>書き込みを取りこぼすことは決してありません</strong>。重複は最大でも 1 era 分の書き込みに収まり、毎時 checkpoint であれば無視できる量です。</p>
 
 <div class="callout">
-<strong>No timing coordination needed.</strong> Checkpoints run on their own schedule. Backups happen whenever. You never need to stop writes or align a checkpoint to a backup.
+<strong>タイミングの調整は不要です。</strong>checkpoint は自分のスケジュールで動き、バックアップはいつ実行してもかまいません。書き込みを止める必要も、checkpoint をバックアップに合わせる必要も一切ありません。
 </div>
 
-<h2>Verified Scenario</h2>
+<h2>検証シナリオ</h2>
 
-<p>We tested this end-to-end in a QEMU VM. The timeline below shows checkpoints running at fixed intervals, with a full backup at an arbitrary point between checkpoints. Writes continue before and after the backup, including writes in the <em>same era</em> as the backup.</p>
+<p>この仕組みを QEMU VM 上でエンドツーエンドに検証しました。以下のタイムラインでは、checkpoint が一定間隔で実行される中、checkpoint と checkpoint の間の任意の時点でフルバックアップを行います。書き込みはバックアップの前後で継続し、バックアップと<em>同じ era</em> の書き込みも含まれます。</p>
 
 <div class="timeline">
   <div class="tl-item">
     <span class="tl-label">t0</span>
     <span class="tl-dot checkpoint"></span>
     <div class="tl-content">
-      <div class="desc">checkpoint (cron)</div>
-      <div class="detail">era advances <span class="tl-era">era=2</span> <span style="color:var(--fg2)">&mdash; dm-era starts at era 1; first checkpoint moves to 2</span></div>
+      <div class="desc">checkpoint（cron）</div>
+      <div class="detail">era が進む <span class="tl-era">era=2</span> <span style="color:var(--fg2)">&mdash; dm-era は era 1 から始まり、最初の checkpoint で 2 になります</span></div>
     </div>
   </div>
   <div class="tl-item">
     <span class="tl-label">t1</span>
     <span class="tl-dot write"></span>
     <div class="tl-content">
-      <div class="desc">writes A &mdash; initial workload</div>
-      <div class="detail">blocks 0-99, 400-449, 700-749 &rarr; recorded in era 2</div>
+      <div class="desc">writes A &mdash; 初期ワークロード</div>
+      <div class="detail">blocks 0-99, 400-449, 700-749 &rarr; era 2 に記録</div>
     </div>
   </div>
   <div class="tl-item">
@@ -226,31 +227,31 @@ $ echo "$BACKUP_ERA" > /backup/last_full_era</code></pre>
     <span class="tl-dot checkpoint"></span>
     <div class="tl-content">
       <div class="desc">checkpoint</div>
-      <div class="detail">era advances <span class="tl-era">era=3</span></div>
+      <div class="detail">era が進む <span class="tl-era">era=3</span></div>
     </div>
   </div>
   <div class="tl-item">
     <span class="tl-label">t3</span>
     <span class="tl-dot write"></span>
     <div class="tl-content">
-      <div class="desc">writes B &mdash; more workload</div>
-      <div class="detail">blocks 50-59 &rarr; recorded in era 3</div>
+      <div class="desc">writes B &mdash; 追加のワークロード</div>
+      <div class="detail">blocks 50-59 &rarr; era 3 に記録</div>
     </div>
   </div>
   <div class="tl-item">
     <span class="tl-label" style="color:var(--green)">t4</span>
     <span class="tl-dot backup"></span>
     <div class="tl-content">
-      <div class="desc"><strong>FULL BACKUP</strong></div>
-      <div class="detail">Record <code>BACKUP_ERA=3</code> (current era at this moment). Writes A+B are on the device and included in the full backup.</div>
+      <div class="desc"><strong>フルバックアップ</strong></div>
+      <div class="detail"><code>BACKUP_ERA=3</code>（この時点の era）を記録。writes A+B はデバイス上にあり、フルバックアップに含まれます。</div>
     </div>
   </div>
   <div class="tl-item">
     <span class="tl-label" style="color:var(--red)">t5</span>
     <span class="tl-dot danger"></span>
     <div class="tl-content">
-      <div class="desc">writes C &mdash; <strong>after full backup, same era!</strong></div>
-      <div class="detail">blocks 300-309 &rarr; still recorded in era 3 (no checkpoint yet). <strong>Not in the full backup.</strong></div>
+      <div class="desc">writes C &mdash; <strong>フルバックアップ後、しかも同じ era！</strong></div>
+      <div class="detail">blocks 300-309 &rarr; まだ era 3 に記録（checkpoint 前のため）。<strong>フルバックアップには含まれていません。</strong></div>
     </div>
   </div>
   <div class="tl-item">
@@ -258,7 +259,7 @@ $ echo "$BACKUP_ERA" > /backup/last_full_era</code></pre>
     <span class="tl-dot checkpoint"></span>
     <div class="tl-content">
       <div class="desc">checkpoint</div>
-      <div class="detail">era advances <span class="tl-era">era=4</span></div>
+      <div class="detail">era が進む <span class="tl-era">era=4</span></div>
     </div>
   </div>
   <div class="tl-item">
@@ -266,7 +267,7 @@ $ echo "$BACKUP_ERA" > /backup/last_full_era</code></pre>
     <span class="tl-dot write"></span>
     <div class="tl-content">
       <div class="desc">writes D</div>
-      <div class="detail">blocks 0-4, 200-219 &rarr; recorded in era 4</div>
+      <div class="detail">blocks 0-4, 200-219 &rarr; era 4 に記録</div>
     </div>
   </div>
   <div class="tl-item">
@@ -274,7 +275,7 @@ $ echo "$BACKUP_ERA" > /backup/last_full_era</code></pre>
     <span class="tl-dot checkpoint"></span>
     <div class="tl-content">
       <div class="desc">checkpoint</div>
-      <div class="detail">era advances <span class="tl-era">era=5</span></div>
+      <div class="detail">era が進む <span class="tl-era">era=5</span></div>
     </div>
   </div>
   <div class="tl-item">
@@ -282,7 +283,7 @@ $ echo "$BACKUP_ERA" > /backup/last_full_era</code></pre>
     <span class="tl-dot write"></span>
     <div class="tl-content">
       <div class="desc">writes E</div>
-      <div class="detail">blocks 5-9, 500-509 &rarr; recorded in era 5</div>
+      <div class="detail">blocks 5-9, 500-509 &rarr; era 5 に記録</div>
     </div>
   </div>
   <div class="tl-item">
@@ -290,22 +291,22 @@ $ echo "$BACKUP_ERA" > /backup/last_full_era</code></pre>
     <span class="tl-dot checkpoint"></span>
     <div class="tl-content">
       <div class="desc">checkpoint</div>
-      <div class="detail">era advances <span class="tl-era">era=6</span></div>
+      <div class="detail">era が進む <span class="tl-era">era=6</span></div>
     </div>
   </div>
   <div class="tl-item">
     <span class="tl-label" style="color:var(--purple)">t11</span>
     <span class="tl-dot diff"></span>
     <div class="tl-content">
-      <div class="desc"><strong>DIFFERENTIAL BACKUP</strong></div>
-      <div class="detail">Snapshot both origin and metadata. Query <code>era &ge; BACKUP_ERA</code> for dirty blocks.</div>
+      <div class="desc"><strong>差分バックアップ</strong></div>
+      <div class="detail">origin と metadata の両方をスナップショットし、<code>era &ge; BACKUP_ERA</code> で dirty block を問い合わせます。</div>
     </div>
   </div>
 </div>
 
 
-<h2>Visualization</h2>
-<p>The timeline above, visualized block by block. Each cell is a 32KB block. Three maps show the device contents, dm-era's dirty tracking, and the backup state at each step.</p>
+<h2>可視化</h2>
+<p>上のタイムラインをブロック単位で可視化したものです。各セルが 32KB のブロックを表します。3 つのマップは、それぞれデバイスの内容、dm-era の dirty トラッキング、各ステップ時点のバックアップ状態を示しています。</p>
 
 <div class="blockmap-wrap">
   <div class="blockmap-header">
@@ -313,26 +314,26 @@ $ echo "$BACKUP_ERA" > /backup/last_full_era</code></pre>
     <div class="blockmap-controls" id="bm-controls"></div>
   </div>
   <div class="blockmap-body" style="padding: 12px;">
-    <div style="font-size: 11px; color: var(--fg2); margin-bottom: 4px; font-weight: 600;">DEVICE &mdash; actual block contents</div>
+    <div style="font-size: 11px; color: var(--fg2); margin-bottom: 4px; font-weight: 600;">DEVICE &mdash; 実際のブロック内容</div>
     <canvas id="devicemap" class="blockmap-canvas"></canvas>
-    <div style="font-size: 11px; color: var(--fg2); margin: 12px 0 4px; font-weight: 600;">DIRTY MAP &mdash; dm-era's per-era tracking</div>
+    <div style="font-size: 11px; color: var(--fg2); margin: 12px 0 4px; font-weight: 600;">DIRTY MAP &mdash; dm-era の era ごとのトラッキング</div>
     <canvas id="blockmap" class="blockmap-canvas"></canvas>
-    <div style="font-size: 11px; color: var(--fg2); margin: 12px 0 4px; font-weight: 600;">BACKUP &mdash; what's been captured</div>
+    <div style="font-size: 11px; color: var(--fg2); margin: 12px 0 4px; font-weight: 600;">BACKUP &mdash; バックアップ済みの範囲</div>
     <canvas id="backupmap" class="blockmap-canvas"></canvas>
   </div>
   <div id="bm-info" style="padding: 8px 12px; font-size: 12px; color: var(--fg2); border-top: 1px solid #222;">
-    Click a step to see the state at that point.
+    ステップをクリックすると、その時点の状態が表示されます。
   </div>
   <div class="blockmap-legend" id="bm-legend"></div>
 </div>
 
-<h2>Experiment: Full Walkthrough</h2>
+<h2>実験：全手順のウォークスルー</h2>
 
-<p>Everything below was run inside a QEMU VM with two virtio disks: <code>vdc</code> (256MB, for era metadata) and <code>vdd</code> (1GB, for the data volume). The kernel is Linux 6.8.0-rc3 from the device-mapper development tree, with <code>CONFIG_DM_ERA=m</code> and <code>CONFIG_DM_SNAPSHOT=m</code>.</p>
+<p>以下はすべて QEMU VM 内で実行しました。virtio ディスクは 2 本：<code>vdc</code>（256MB、era metadata 用）と <code>vdd</code>（1GB、データボリューム用）です。カーネルは device-mapper 開発ツリーの Linux 6.8.0-rc3 で、<code>CONFIG_DM_ERA=m</code> と <code>CONFIG_DM_SNAPSHOT=m</code> を有効にしています。</p>
 
-<h3>1. Setup: LVM + dm-era</h3>
+<h3>1. セットアップ：LVM + dm-era</h3>
 
-<p>Create two separate volume groups &mdash; one for the era metadata, one for the data. This lets us snapshot them independently.</p>
+<p>ボリュームグループを 2 つに分けて作成します &mdash; era metadata 用とデータ用です。こうすることで、それぞれを独立にスナップショットできます。</p>
 
 <pre><code><span style="color:var(--fg2)"># Metadata VG (vdc)</span>
 $ pvcreate /dev/vdc
@@ -354,9 +355,9 @@ $ dmsetup status eradev
 0 1638400 era 8 34/8192 1 -
 <span style="color:var(--fg2)">#                        ^current_era=1</span></code></pre>
 
-<p>The <code>64</code> at the end is the era block size in sectors (64 &times; 512 = 32KB). Every 32KB region of the device is tracked as a single unit.</p>
+<p>末尾の <code>64</code> はセクタ単位の era block size です（64 &times; 512 = 32KB）。デバイスの 32KB ごとの領域が 1 つの単位として追跡されます。</p>
 
-<h3>2. t0&ndash;t2: Initial workload + checkpoints</h3>
+<h3>2. t0&ndash;t2：初期ワークロード + checkpoint</h3>
 
 <pre><code><span style="color:var(--fg2)"># t0: Advance era (simulating a cron checkpoint)</span>
 $ dmsetup message eradev 0 checkpoint
@@ -372,7 +373,7 @@ $ dd if=/dev/urandom of=/dev/mapper/eradev bs=32768 count=50 seek=700 oflag=dire
 $ dmsetup message eradev 0 checkpoint
 <span style="color:var(--fg2)"># era is now 3</span></code></pre>
 
-<h3>3. t3&ndash;t4: More writes, then full backup</h3>
+<h3>3. t3&ndash;t4：追加の書き込みとフルバックアップ</h3>
 
 <pre><code><span style="color:var(--fg2)"># t3: writes B</span>
 $ dd if=/dev/urandom of=/dev/mapper/eradev bs=32768 count=10 seek=50 oflag=direct
@@ -385,9 +386,9 @@ $ echo $BACKUP_ERA
 <span style="color:var(--fg2)"># In production: dd/rsync/your-backup-tool the full device here</span>
 <span style="color:var(--fg2)"># Writes A and B are on the device, included in the full backup</span></code></pre>
 
-<h3>4. t5&ndash;t10: Post-backup writes + checkpoints</h3>
+<h3>4. t5&ndash;t10：バックアップ後の書き込み + checkpoint</h3>
 
-<p>This is the interesting part. Writes C happen <em>after</em> the full backup but <em>before</em> the next checkpoint &mdash; they land in the same era (3) as the backup.</p>
+<p>ここが面白いところです。writes C はフルバックアップの<em>後</em>、次の checkpoint の<em>前</em>に発生します &mdash; つまり、バックアップと同じ era（3）に記録されます。</p>
 
 <pre><code><span style="color:var(--fg2)"># t5: writes C &mdash; AFTER full backup, but still era 3!</span>
 $ dd if=/dev/urandom of=/dev/mapper/eradev bs=32768 count=10 seek=300 oflag=direct
@@ -412,9 +413,9 @@ $ dd if=/dev/urandom of=/dev/mapper/eradev bs=32768 count=10 seek=500 oflag=dire
 <span style="color:var(--fg2)"># t10: Checkpoint</span>
 $ dmsetup message eradev 0 checkpoint   <span style="color:var(--fg2)"># era=6</span></code></pre>
 
-<h3>5. t11: Differential backup (zero downtime)</h3>
+<h3>5. t11：差分バックアップ（無停止）</h3>
 
-<p>Now we want a diff since the full backup. The device stays live throughout.</p>
+<p>いよいよフルバックアップ以降の差分を取ります。この間もデバイスは稼働し続けます。</p>
 
 <pre><code><span style="color:var(--fg2)"># Step 1: Snapshot the data volume (consistent read)</span>
 $ lvcreate -L 100M -s -n datasnap datavg/data
@@ -437,7 +438,7 @@ $ era_dump --logical /dev/metavg/metasnap | head -8
     &lt;era block="4" era="4"/&gt;
     &lt;era block="5" era="5"/&gt;</code></pre>
 
-<p>Each line tells us: block N was last written in era M. To find blocks dirty since the full backup, we filter for <code>era &ge; BACKUP_ERA (3)</code>:</p>
+<p>各行は「block N は era M で最後に書き込まれた」ことを表します。フルバックアップ以降に dirty になったブロックを求めるには、<code>era &ge; BACKUP_ERA (3)</code> でフィルタします。</p>
 
 <pre><code><span style="color:var(--fg2)"># Step 4: Extract dirty block list</span>
 $ python3 -c "
@@ -494,45 +495,45 @@ $ lvremove -f datavg/datasnap
 $ lvremove -f metavg/metasnap</code></pre>
 
 <div class="callout ok">
-<strong>During this entire procedure</strong>, the dm-era device was live. We verified by writing to it between steps &mdash; no errors, no pauses.
+<strong>この手順の間ずっと</strong>、dm-era デバイスは稼働したままでした。ステップの合間に実際に書き込んで確認しましたが、エラーも停止も一切ありませんでした。
 </div>
 
-<h2>Results</h2>
+<h2>結果</h2>
 
 <div style="display:flex;gap:16px;margin:24px 0;flex-wrap:wrap;">
   <div class="result-box" style="flex:1;min-width:200px;">
     <div class="big">60 / 25,600</div>
-    <div class="label">dirty blocks extracted</div>
+    <div class="label">抽出された dirty block 数</div>
   </div>
   <div class="result-box" style="flex:1;min-width:200px;">
     <div class="big">1,920 KB</div>
-    <div class="label">differential backup size</div>
+    <div class="label">差分バックアップのサイズ</div>
   </div>
   <div class="result-box" style="flex:1;min-width:200px;">
     <div class="big">99.8%</div>
-    <div class="label">data reduction</div>
+    <div class="label">データ削減率</div>
   </div>
 </div>
 
-<h3>Dirty Block Breakdown</h3>
+<h3>dirty block の内訳</h3>
 
 <table>
-<tr><th>Blocks</th><th>Era</th><th>Written at</th><th>In full backup?</th><th>In diff?</th></tr>
-<tr><td>50-59</td><td class="num">3</td><td>t3 (writes B)</td><td style="color:var(--green)">Yes (redundant)</td><td>Yes</td></tr>
-<tr><td>300-309</td><td class="num">3</td><td>t5 (writes C)</td><td style="color:var(--red)">No</td><td style="color:var(--green)">Yes</td></tr>
-<tr><td>0-4</td><td class="num">4</td><td>t7 (writes D)</td><td style="color:var(--red)">No</td><td style="color:var(--green)">Yes</td></tr>
-<tr><td>200-219</td><td class="num">4</td><td>t7 (writes D)</td><td style="color:var(--red)">No</td><td style="color:var(--green)">Yes</td></tr>
-<tr><td>5-9</td><td class="num">5</td><td>t9 (writes E)</td><td style="color:var(--red)">No</td><td style="color:var(--green)">Yes</td></tr>
-<tr><td>500-509</td><td class="num">5</td><td>t9 (writes E)</td><td style="color:var(--red)">No</td><td style="color:var(--green)">Yes</td></tr>
+<tr><th>Blocks</th><th>Era</th><th>書き込み時点</th><th>フルバックアップに含まれる？</th><th>差分に含まれる？</th></tr>
+<tr><td>50-59</td><td class="num">3</td><td>t3（writes B）</td><td style="color:var(--green)">含まれる（冗長）</td><td>含まれる</td></tr>
+<tr><td>300-309</td><td class="num">3</td><td>t5（writes C）</td><td style="color:var(--red)">含まれない</td><td style="color:var(--green)">含まれる</td></tr>
+<tr><td>0-4</td><td class="num">4</td><td>t7（writes D）</td><td style="color:var(--red)">含まれない</td><td style="color:var(--green)">含まれる</td></tr>
+<tr><td>200-219</td><td class="num">4</td><td>t7（writes D）</td><td style="color:var(--red)">含まれない</td><td style="color:var(--green)">含まれる</td></tr>
+<tr><td>5-9</td><td class="num">5</td><td>t9（writes E）</td><td style="color:var(--red)">含まれない</td><td style="color:var(--green)">含まれる</td></tr>
+<tr><td>500-509</td><td class="num">5</td><td>t9（writes E）</td><td style="color:var(--red)">含まれない</td><td style="color:var(--green)">含まれる</td></tr>
 </table>
 
-<p>Blocks 50-59 (writes B) are the only redundancy &mdash; they're in both the full backup and the diff. This is the cost of including the full BACKUP_ERA: we pick up a few blocks that were written <em>before</em> the full backup in the same era. In practice, with hourly checkpoints, this overlap is at most one era's worth of writes &mdash; negligible compared to the total device size.</p>
+<p>blocks 50-59（writes B）だけが冗長で、フルバックアップと差分の両方に含まれます。これは BACKUP_ERA 全体を含めることのコストです。同じ era の中でフルバックアップより<em>前</em>に書かれたブロックも少し拾ってしまうためです。実運用では、毎時 checkpoint であればこの重複は最大でも 1 era 分の書き込みに収まり、デバイス全体のサイズに比べれば無視できる量です。</p>
 
-<p>The critical row is blocks 300-309 (writes C). These were written <em>after</em> the full backup but in the <em>same era</em>. By taking the diff from the BACKUP_ERA onwards, they're correctly captured without any timing coordination.</p>
+<p>決定的に重要なのは blocks 300-309（writes C）の行です。これらはフルバックアップの<em>後</em>に、しかし<em>同じ era</em> の中で書き込まれました。BACKUP_ERA 以降で差分を取ることで、タイミングの調整を一切せずに正しく捕捉できています。</p>
 
-<h3>Integrity verification</h3>
+<h3>整合性の検証</h3>
 
-<p>The ultimate test: apply the differential backup on top of the full backup and compare the result against the snapshot taken at diff time. If they match byte-for-byte, no writes were lost.</p>
+<p>最後の仕上げのテストです。フルバックアップの上に差分バックアップを適用し、差分取得時に取ったスナップショットと比較します。バイト単位で一致すれば、書き込みは一切失われていないことになります。</p>
 
 <pre><code><span style="color:var(--fg2)"># Reconstruct: copy full backup, apply diff blocks on top</span>
 $ cp /backup/full.img /backup/reconstructed.img
@@ -547,21 +548,21 @@ $ md5sum /backup/reconstructed.img
 544fb63b202fb3f0eac9f082b17754ac</code></pre>
 
 <div class="callout ok">
-<strong>Exact match.</strong> The full backup + differential produces a byte-identical copy of the device at the moment the differential snapshot was taken. No writes were missed, no data was corrupted.
+<strong>完全一致。</strong>フルバックアップ + 差分から、差分スナップショット取得時点のデバイスとバイト単位で同一のコピーが復元できました。書き込みの取りこぼしもデータ破損もありません。
 </div>
 
 
-<h2>Conclusion</h2>
+<h2>まとめ</h2>
 
-<p>dm-era is a simple, underutilized kernel feature that enables differential backups on any block device &mdash; without thin provisioning, without pool management, and without stopping the device. By recording a single integer (the current era) at full-backup time, you get a precise dirty block map that tells you exactly which sectors to copy next time.</p>
+<p>dm-era はシンプルながら十分に活用されていないカーネル機能で、任意のブロックデバイスに対する差分バックアップを可能にします &mdash; シンプロビジョニングも、プール管理も、デバイスの停止も不要です。フルバックアップの時点で整数を 1 つ（その時点の era）記録しておくだけで、次回どのセクタをコピーすべきかを正確に示す dirty block map が得られます。</p>
 
-<p>This article demonstrated the approach with a full backup followed by a single differential. The same mechanism naturally extends to <strong>incremental backups</strong>: record the era at each backup, and next time query only blocks written since that era. Multiple incremental chains, rotation schemes, and retention policies are all possible &mdash; the era counter just keeps going.</p>
+<p>本記事では、フルバックアップと 1 回の差分バックアップという構成でこのアプローチを実証しました。同じ仕組みは<strong>増分バックアップ</strong>にも自然に拡張できます。バックアップのたびに era を記録し、次回はその era 以降に書き込まれたブロックだけを問い合わせればよいのです。複数の増分チェーン、ローテーション方式、保持ポリシーもすべて実現可能で、era カウンタはただ進み続けるだけです。</p>
 
-<p>The test was conducted in a small VM with synthetic writes. Production workloads involve larger devices, higher I/O rates, and longer era histories. The era block size (32KB in our test) affects tracking granularity and metadata size &mdash; tuning it for your workload is worth investigating. As with any backup strategy, validate your restore path end-to-end before relying on it.</p>
+<p>今回のテストは小さな VM と合成的な書き込みで行いました。本番のワークロードでは、より大きなデバイス、より高い I/O レート、より長い era の履歴が関わってきます。era block size（今回のテストでは 32KB）は追跡の粒度と metadata のサイズに影響するため、ワークロードに合わせたチューニングを検討する価値があります。他のバックアップ戦略と同様、実際に頼る前にリストア経路をエンドツーエンドで検証してください。</p>
 
 <footer>
-  Tested on Linux 6.8.0-rc3 (dm-6.8 branch) in a QEMU VM with LVM snapshots.
-  Era block size: 64 sectors (32KB). Origin: 800MB. Metadata: 32MB.
+  Linux 6.8.0-rc3（dm-6.8 ブランチ）、QEMU VM 上で LVM スナップショットを使用して検証。
+  era block size：64 セクタ（32KB）。origin：800MB。metadata：32MB。
 </footer>
 
 </div>

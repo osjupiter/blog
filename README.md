@@ -20,6 +20,8 @@ sitemap.xml                  # generated — do not edit by hand
    `<link rel="canonical">` pointing at
    `https://osjupiter.github.io/blog/articles/<slug>/`, and Open Graph tags
    (copy the head of an existing article).
+   Each article also ships a Japanese translation as `index.ja.html` —
+   conventions are in [CLAUDE.md](CLAUDE.md).
 2. Commit and push. The GitHub Actions workflow rebuilds `index.html` and
    deploys everything to GitHub Pages.
 

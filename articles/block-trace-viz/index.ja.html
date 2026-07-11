@@ -1,27 +1,28 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ja">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Visualizing Linux Block I/O: How LVM, ZFS, and Btrfs Actually Write to Disk</title>
-<meta name="description" content="Animated blktrace visualizations showing write amplification, COW behavior, and snapshot overhead across storage stacks.">
-<link rel="canonical" href="https://osjupiter.github.io/blog/articles/block-trace-viz/">
+<title>LinuxブロックI/Oの可視化：LVM・ZFS・Btrfsは実際どのようにディスクへ書き込むのか</title>
+<meta name="description" content="blktraceで記録したI/Oをアニメーション可視化し、ストレージスタックごとのwrite amplification（書き込み増幅）、COWの挙動、スナップショットのオーバーヘッドを観察します。">
+<link rel="canonical" href="https://osjupiter.github.io/blog/articles/block-trace-viz/index.ja.html">
 <link rel="alternate" hreflang="en" href="https://osjupiter.github.io/blog/articles/block-trace-viz/">
 <link rel="alternate" hreflang="ja" href="https://osjupiter.github.io/blog/articles/block-trace-viz/index.ja.html">
 <link rel="alternate" hreflang="x-default" href="https://osjupiter.github.io/blog/articles/block-trace-viz/">
 <meta property="og:site_name" content="osjupiter">
-<meta property="og:title" content="Visualizing Linux Block I/O: How LVM, ZFS, and Btrfs Actually Write to Disk">
-<meta property="og:description" content="Animated blktrace visualizations showing write amplification, COW behavior, and snapshot overhead across storage stacks.">
+<meta property="og:title" content="LinuxブロックI/Oの可視化：LVM・ZFS・Btrfsは実際どのようにディスクへ書き込むのか">
+<meta property="og:description" content="blktraceで記録したI/Oをアニメーション可視化し、ストレージスタックごとのwrite amplification（書き込み増幅）、COWの挙動、スナップショットのオーバーヘッドを観察します。">
 <meta property="og:type" content="article">
-<meta property="og:url" content="https://osjupiter.github.io/blog/articles/block-trace-viz/">
+<meta property="og:url" content="https://osjupiter.github.io/blog/articles/block-trace-viz/index.ja.html">
 <meta name="twitter:card" content="summary">
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
   "@type": "TechArticle",
-  "headline": "Visualizing Linux Block I/O: How LVM, ZFS, and Btrfs Actually Write to Disk",
-  "description": "Animated blktrace visualizations showing write amplification, COW behavior, and snapshot overhead across storage stacks.",
-  "url": "https://osjupiter.github.io/blog/articles/block-trace-viz/",
+  "headline": "LinuxブロックI/Oの可視化：LVM・ZFS・Btrfsは実際どのようにディスクへ書き込むのか",
+  "description": "blktraceで記録したI/Oをアニメーション可視化し、ストレージスタックごとのwrite amplification（書き込み増幅）、COWの挙動、スナップショットのオーバーヘッドを観察します。",
+  "url": "https://osjupiter.github.io/blog/articles/block-trace-viz/index.ja.html",
+  "inLanguage": "ja",
   "datePublished": "2026-04-05",
   "dateModified": "2026-04-07",
   "author": {"@type": "Person", "name": "osjupiter", "url": "https://github.com/osjupiter"}
@@ -113,24 +114,24 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 </head>
 <body>
 <div class="container">
-<div class="lang-switch"><strong>EN</strong> · <a href="index.ja.html">日本語</a></div>
+<div class="lang-switch"><a href="./">EN</a> · <strong>日本語</strong></div>
 
-<h1>Visualizing Linux Block I/O: How LVM, ZFS, and Btrfs Actually Write to Disk</h1>
-<p class="subtitle">Animated blktrace visualizations showing write amplification, COW behavior, and snapshot overhead across storage stacks.</p>
+<h1>LinuxブロックI/Oの可視化：LVM・ZFS・Btrfsは実際どのようにディスクへ書き込むのか</h1>
+<p class="subtitle">blktraceで記録したI/Oをアニメーション可視化し、ストレージスタックごとのwrite amplification（書き込み増幅）、COWの挙動、スナップショットのオーバーヘッドを観察します。</p>
 
-<h2>What This Is</h2>
-<p>When you write 4KB to a file, how much actually hits the disk? The answer depends on your storage stack, and it can be surprising. We ran <code>fio</code> random writes through different Linux storage configurations inside a QEMU VM, captured every block I/O event with <code>blktrace</code>, and animated the results.</p>
+<h2>この記事について</h2>
+<p>ファイルに4KBを書き込んだとき、実際にディスクへ届くのは何バイトでしょうか？答えはストレージスタック次第で、しばしば予想を裏切ります。QEMU VM内のさまざまなLinuxストレージ構成に対して <code>fio</code> のランダム書き込みを実行し、すべてのブロックI/Oイベントを <code>blktrace</code> で記録して、その結果をアニメーション化しました。</p>
 
-<p>Each dot in the visualizations below is a real I/O completion event. The Y axis shows the physical sector on disk, and dots flow left-to-right over time. You can see exactly where and when each write (or read) lands on the physical device.</p>
+<p>以下の可視化に現れるドットの一つひとつが、実際のI/O完了イベントです。Y軸はディスク上の物理セクタを表し、ドットは時間の経過とともに左から右へ流れていきます。それぞれの書き込み（および読み取り)が、物理デバイス上のどこに・いつ着地したのかを正確に見て取ることができます。</p>
 
 <div class="callout">
-<strong>Experiment setup:</strong> QEMU/KVM VM with 4 vCPUs, 4GB RAM. Two 10GB virtio disks. I/O scheduler set to <code>none</code>, <code>fio</code> with <code>--iodepth=1 --direct=1</code> for deterministic ordering. All I/O captured via <code>blktrace</code> on the physical block device.
+<strong>実験環境：</strong>QEMU/KVM VM（4 vCPU、4GB RAM）。10GBのvirtioディスク2台。I/Oスケジューラは <code>none</code>、順序を決定的にするため <code>fio</code> は <code>--iodepth=1 --direct=1</code> で実行。すべてのI/Oは物理ブロックデバイス上で <code>blktrace</code> により記録しています。
 </div>
 
 <!-- ============================================================ -->
-<h2>Experiment 1: LVM Linear vs dm-thin</h2>
+<h2>実験1：LVMリニア vs dm-thin</h2>
 
-<p>The simplest comparison: a plain LVM logical volume (linear mapping) vs a thin-provisioned LV. Same random 4KB writes, same seed, same duration.</p>
+<p>まずは最もシンプルな比較です。素のLVM論理ボリューム（リニアマッピング）と、シンプロビジョニングされたLVを比べます。同じランダム4KB書き込み、同じシード、同じ実行時間です。</p>
 
 <div class="diagram">
 <svg width="340" height="180" viewBox="0 0 340 180" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -183,27 +184,27 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 </svg>
 </div>
 
-<p><strong>dm-linear</strong> is the simplest device-mapper target: it adds a fixed offset to the sector address and passes the I/O straight to the physical device. No lookup, no metadata, no overhead. A 4KB write becomes exactly one 4KB write on disk.</p>
+<p><strong>dm-linear</strong> は最も単純なdevice-mapperターゲットです。セクタアドレスに固定オフセットを加算し、I/Oをそのまま物理デバイスへ渡します。ルックアップもメタデータもオーバーヘッドもありません。4KBの書き込みは、ディスク上でもきっかり1回の4KB書き込みになります。</p>
 
-<p><strong>dm-thin</strong> adds a layer of indirection. Each write triggers a btree lookup to find the physical block. If the block is already mapped, it's remapped directly (fast path). If not, a new block is allocated from the pool's space map, and both the btree and space map are updated. These metadata changes are batched and committed to disk roughly every second &mdash; during the commit (~50-100ms), a write lock blocks all new I/O from performing lookups.</p>
+<p><strong>dm-thin</strong> は間接参照の層を1つ追加します。書き込みのたびにbtreeをルックアップして物理ブロックを特定します。ブロックがすでにマップ済みならそのままリマップされます（高速パス）。未マップなら、プールのスペースマップから新しいブロックが割り当てられ、btreeとスペースマップの両方が更新されます。これらのメタデータ変更はまとめられ、およそ1秒ごとにディスクへコミットされます。コミット中（約50〜100ms）は書き込みロックがかかり、新しいI/Oはすべてルックアップをブロックされます。</p>
 
 <div id="viz-basic" class="viz-wrap"></div>
 
 <table>
 <tr><th></th><th>Linear</th><th>Thin</th></tr>
-<tr><td>Write events</td><td class="num">171,284 WS</td><td class="num">78,400 WS + 29,844 W</td></tr>
+<tr><td>書き込みイベント数</td><td class="num">171,284 WS</td><td class="num">78,400 WS + 29,844 W</td></tr>
 <tr><td>IOPS</td><td class="num">~17,000</td><td class="num">~10,500</td></tr>
-<tr><td>Extra I/O</td><td>None</td><td>~30k metadata writes (64KB chunks)</td></tr>
+<tr><td>追加I/O</td><td>なし</td><td>約3万件のメタデータ書き込み（64KBチャンク）</td></tr>
 </table>
 
-<p>Linear is almost 1:1 &mdash; fio writes 4KB, the disk gets 4KB. Thin provisioning adds <strong>metadata writes</strong> (orange dots) for every new chunk allocation. The thin pool uses 64KB chunks, so each first-time write to a chunk triggers a metadata update.</p>
+<p>リニアはほぼ1:1です。fioが4KBを書けば、ディスクにも4KBが書かれます。一方シンプロビジョニングでは、チャンクを新規割り当てするたびに<strong>メタデータ書き込み</strong>（オレンジのドット）が発生します。thinプールは64KBチャンクを使うため、各チャンクへの初回書き込みごとにメタデータ更新が走るのです。</p>
 
-<p>The thin side also shows periodic <strong>~100ms pauses</strong> roughly every second. These are dm-thin's <strong>transaction commits</strong> &mdash; it batches metadata btree updates and flushes them to disk, blocking data I/O during the commit.</p>
+<p>thin側では、およそ1秒ごとに<strong>約100msの停止</strong>が周期的に見られます。これはdm-thinの<strong>トランザクションコミット</strong>です。メタデータbtreeの更新をまとめてディスクへフラッシュしており、コミットの間はデータI/Oがブロックされます。</p>
 
 <!-- ============================================================ -->
-<h2>Experiment 2: LVM Snapshot &mdash; COW vs ROW</h2>
+<h2>実験2：LVMスナップショット &mdash; COW vs ROW</h2>
 
-<p>What happens when you take a snapshot and keep writing? When you snapshot a regular (linear) LV, LVM uses <strong>dm-snapshot</strong> &mdash; a kernel module that intercepts writes and performs <strong>Copy-on-Write (COW)</strong>: before overwriting a block, it reads the old data and copies it to a separate area. Thin LVs handle snapshots differently with <strong>Redirect-on-Write (ROW)</strong>: instead of copying old data, new data is written to a fresh location and the metadata pointer is updated to point there.</p>
+<p>スナップショットを取ってそのまま書き込み続けると、何が起きるのでしょうか？通常の（リニア）LVをスナップショットすると、LVMは <strong>dm-snapshot</strong> を使います。これは書き込みをインターセプトして <strong>Copy-on-Write（COW）</strong>を行うカーネルモジュールで、ブロックを上書きする前に古いデータを読み出し、別領域へコピーします。thin LVのスナップショットは <strong>Redirect-on-Write（ROW）</strong>という別の方式です。古いデータをコピーする代わりに、新しいデータを新しい場所へ書き込み、メタデータのポインタをそちらへ向け直します。</p>
 
 <div class="diagram">
 <svg width="340" height="230" viewBox="0 0 340 230" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -254,58 +255,58 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 </svg>
 </div>
 
-<p><strong>dm-snapshot (COW)</strong> must preserve the old data before overwriting it. For each write, it reads the old block, copies it to a COW area, flushes to ensure the copy is persisted, updates the mapping table, flushes again, and only then writes the new data. Two flushes per write, each ~1ms, making this a 6-step serial process.</p>
+<p><strong>dm-snapshot（COW）</strong>は、上書きする前に古いデータを保全しなければなりません。書き込みごとに、古いブロックを読み出し、COW領域へコピーし、コピーの永続化を保証するためにフラッシュし、マッピングテーブルを更新し、再度フラッシュし、それからようやく新しいデータを書き込みます。書き込み1回につきフラッシュ2回（各約1ms）を含む、6ステップの直列処理です。</p>
 
-<p><strong>dm-thin (ROW)</strong> avoids all of this. Since it already uses indirect block mapping, a snapshot just freezes the current metadata pointers. New writes go to freshly allocated blocks with updated pointers &mdash; the old blocks remain untouched for the snapshot. No read of old data, no copy, no per-write flush. Metadata is committed in batches as before.</p>
+<p><strong>dm-thin（ROW）</strong>はこれらをすべて回避します。もともと間接的なブロックマッピングを使っているため、スナップショットは現在のメタデータポインタを凍結するだけで済みます。新しい書き込みは新規割り当てブロックへ向かい、ポインタが更新されます。古いブロックはスナップショット用に手つかずのまま残ります。古いデータの読み出しもコピーも、書き込みごとのフラッシュもありません。メタデータはこれまでどおりバッチでコミットされます。</p>
 
 <div id="viz-snap" class="viz-wrap"></div>
 
-<p>The difference is dramatic. Notice how the linear panel nearly stops after the snapshot &mdash; the dots become extremely sparse. The 37x slowdown isn't just a number: you can see that the linear side writes almost nothing in the same time the thin side fills the screen with activity. Before the snapshot, writes complete quickly because the device's internal volatile cache absorbs them (~16k IOPS). After the snapshot, dm-snapshot forces a flush on every write to persist the COW mapping, which drains the device cache each time. This flush adds ~1ms of latency per write, and with two flushes per COW cycle, write throughput drops to almost nothing.</p>
+<p>その差は劇的です。スナップショット後、リニア側のパネルがほぼ停止し、ドットが極端にまばらになる点に注目してください。37倍のスローダウンは単なる数字ではありません。thin側が画面をアクティビティで埋め尽くす同じ時間の間、リニア側はほとんど何も書けていないことが目で確認できます。スナップショット前の書き込みが速いのは、デバイス内部の揮発性キャッシュが書き込みを吸収してくれるからです（約16k IOPS）。スナップショット後は、dm-snapshotがCOWマッピングを永続化するために書き込みのたびにフラッシュを強制し、そのたびにデバイスキャッシュがドレインされます。このフラッシュが書き込みごとに約1msのレイテンシを加え、COWサイクルあたり2回のフラッシュにより、書き込みスループットはほぼゼロまで落ち込みます。</p>
 
 <table>
-<tr><th></th><th>Linear + Snapshot (COW)</th><th>Thin + Snapshot (ROW)</th></tr>
-<tr><td>IOPS before snap</td><td class="num">~16,000</td><td class="num">~14,600</td></tr>
-<tr><td>IOPS after snap</td><td class="num"><strong>~430</strong></td><td class="num">~13,600</td></tr>
-<tr><td>Slowdown</td><td class="num"><strong>37x</strong></td><td class="num">1.07x</td></tr>
-<tr><td>Read I/O after snap</td><td>Yes (COW read)</td><td>None</td></tr>
+<tr><th></th><th>リニア + スナップショット（COW）</th><th>thin + スナップショット（ROW）</th></tr>
+<tr><td>スナップショット前のIOPS</td><td class="num">~16,000</td><td class="num">~14,600</td></tr>
+<tr><td>スナップショット後のIOPS</td><td class="num"><strong>~430</strong></td><td class="num">~13,600</td></tr>
+<tr><td>スローダウン</td><td class="num"><strong>37x</strong></td><td class="num">1.07x</td></tr>
+<tr><td>スナップショット後の読み取りI/O</td><td>あり（COW読み取り）</td><td>なし</td></tr>
 </table>
 
 <div class="callout danger">
-<strong>LVM snapshot COW is catastrophically slow for random writes.</strong> Each 4KB write becomes a 6-step sequence: Read old block &rarr; Write to COW area &rarr; <strong>Flush</strong> &rarr; Write COW mapping table &rarr; <strong>Flush</strong> &rarr; Write new data. The two flushes (write barriers) ensure that the COW mapping is persisted before the original block is overwritten &mdash; without them, a crash could corrupt the snapshot. Measuring the actual timing of each step: R ~0.06ms, W ~0.08ms, <strong>Flush ~0.9ms &times; 2 = 1.8ms</strong>, total ~2ms per write. The flushes alone account for 90% of the latency, producing the 37x slowdown from ~16k IOPS down to ~430. The green dots (reads) are the COW source reads.
+<strong>LVMスナップショットのCOWは、ランダム書き込みに対して壊滅的に遅くなります。</strong>4KBの書き込み1回が6ステップのシーケンスになるのです：古いブロックを読む &rarr; COW領域へ書く &rarr; <strong>フラッシュ</strong> &rarr; COWマッピングテーブルを書く &rarr; <strong>フラッシュ</strong> &rarr; 新しいデータを書く。2回のフラッシュ（ライトバリア）は、元のブロックが上書きされる前にCOWマッピングが永続化されることを保証します。これがないと、クラッシュ時にスナップショットが破損しかねません。各ステップの実測タイミングは、R 約0.06ms、W 約0.08ms、<strong>フラッシュ 約0.9ms &times; 2 = 1.8ms</strong>で、書き込みあたり合計約2msです。レイテンシの90%をフラッシュだけで占めており、これが約16k IOPSから約430への37倍のスローダウンを生んでいます。緑のドット（読み取り）はCOWのソース読み取りです。
 </div>
 
 <div class="callout">
-<strong>Why don't other snapshot implementations flush on every write?</strong> dm-thin and ZFS/Btrfs batch metadata updates into periodic transaction commits (dm-thin ~1s, ZFS ~5s, Btrfs ~30s). This means a crash could lose the last few seconds of writes, but snapshots remain consistent because the metadata is updated atomically at commit time. dm-snapshot chose the safer but slower path: every single COW operation is immediately persisted. An <code>fsync()</code> from the application would trigger a commit on the batched systems too, but fio with <code>O_DIRECT</code> alone does not force one.
+<strong>なぜ他のスナップショット実装は書き込みごとにフラッシュしないのでしょうか？</strong> dm-thinやZFS/Btrfsは、メタデータ更新を周期的なトランザクションコミットにまとめます（dm-thin 約1秒、ZFS 約5秒、Btrfs 約30秒）。そのためクラッシュ時には直近数秒分の書き込みを失う可能性がありますが、メタデータはコミット時にアトミックに更新されるため、スナップショットの一貫性は保たれます。dm-snapshotは、より安全だが遅い道を選びました。COW操作を1件ずつ、その場で永続化するのです。アプリケーションが <code>fsync()</code> を発行すればバッチ方式のシステムでもコミットが走りますが、fioが <code>O_DIRECT</code> だけを使う場合、コミットは強制されません。
 </div>
 
-<h3>Aside: What if we add fsync?</h3>
+<h3>余談：fsyncを加えるとどうなるか</h3>
 
-<p>The 37x slowdown above is partly because dm-linear <em>without</em> snapshots never flushes the device cache &mdash; <code>O_DIRECT</code> alone doesn't trigger a flush. Adding <code>fsync</code> after every write (<code>fio --fsync=1</code>) forces all implementations to flush, leveling the playing field:</p>
+<p>上の37倍のスローダウンには、スナップショット<em>なし</em>のdm-linearがデバイスキャッシュを一切フラッシュしないという事情もあります。<code>O_DIRECT</code> だけではフラッシュは発生しないのです。書き込みごとに <code>fsync</code> を加える（<code>fio --fsync=1</code>）と、すべての実装がフラッシュを強制され、条件が揃います：</p>
 
 <div id="viz-fsync" class="viz-wrap"></div>
 
 <table>
-<tr><th></th><th>Without fsync</th><th>With fsync</th></tr>
-<tr><td>Linear (no snapshot)</td><td class="num">17,900 IOPS</td><td class="num">806 IOPS</td></tr>
-<tr><td>Linear + Snapshot</td><td class="num"><strong>422 IOPS</strong></td><td class="num">315 IOPS</td></tr>
-<tr><td>Thin (no snapshot)</td><td class="num">10,900 IOPS</td><td class="num">784 IOPS</td></tr>
-<tr><td>Thin + Snapshot</td><td class="num">10,100 IOPS</td><td class="num"><strong>290 IOPS</strong></td></tr>
+<tr><th></th><th>fsyncなし</th><th>fsyncあり</th></tr>
+<tr><td>リニア（スナップショットなし）</td><td class="num">17,900 IOPS</td><td class="num">806 IOPS</td></tr>
+<tr><td>リニア + スナップショット</td><td class="num"><strong>422 IOPS</strong></td><td class="num">315 IOPS</td></tr>
+<tr><td>thin（スナップショットなし）</td><td class="num">10,900 IOPS</td><td class="num">784 IOPS</td></tr>
+<tr><td>thin + スナップショット</td><td class="num">10,100 IOPS</td><td class="num"><strong>290 IOPS</strong></td></tr>
 </table>
 
-<p>Several things become clear from this table. Adding fsync to plain linear drops IOPS from 17,900 to 806 (22x) &mdash; this is purely the cost of flushing the device cache on every write. Adding fsync to dm-snapshot barely changes anything (422 &rarr; 315, 1.3x), because it's already flushing on every write. Comparing with fsync (which levels the playing field), the snapshot COW overhead is 806 &rarr; 315 = 2.6x &mdash; the cost of reading the old block, copying it, and writing the mapping table.</p>
+<p>この表からはいくつかのことが読み取れます。素のリニアにfsyncを加えると、IOPSは17,900から806へ落ちます（22倍）。これは純粋に、書き込みごとにデバイスキャッシュをフラッシュするコストです。dm-snapshotにfsyncを加えてもほとんど変わりません（422 &rarr; 315、1.3倍）。もともと書き込みごとにフラッシュしているからです。条件の揃うfsyncあり同士で比較すると、スナップショットCOWのオーバーヘッドは806 &rarr; 315 = 2.6倍で、これが古いブロックの読み取り・コピー・マッピングテーブル書き込みのコストに相当します。</p>
 
-<p>dm-thin tells a different story. Without fsync, snapshots barely matter (10,900 &rarr; 10,100 IOPS). But with fsync, thin drops to <strong>290 IOPS</strong> &mdash; even slower than dm-snapshot (315). This is because each fsync forces a full dm-thin metadata transaction commit with 3 flushes, compared to dm-snapshot's 2 flushes per COW.</p>
+<p>dm-thinは違う顔を見せます。fsyncなしなら、スナップショットの影響はごくわずかです（10,900 &rarr; 10,100 IOPS）。ところがfsyncを加えると、thinは<strong>290 IOPS</strong>まで落ち、dm-snapshot（315）よりもさらに遅くなります。fsyncのたびにdm-thinのメタデータトランザクションコミット一式（フラッシュ3回）が強制されるためで、dm-snapshotのCOWあたり2回のフラッシュより多いのです。</p>
 
-<p>The overarching pattern: <strong>any configuration that triggers a device flush drops below 1,000 IOPS on this SSD.</strong> The flush latency (~1ms on consumer NVMe) is the great equalizer &mdash; no matter how clever the storage stack, you can't write faster than the device can flush. The dramatic differences in the experiments above (17k vs 400 IOPS) are largely about <em>which configurations flush on every write</em> versus which ones batch and defer.</p>
+<p>全体を貫くパターンはこうです：<strong>デバイスフラッシュを引き起こす構成は、このSSDでは例外なく1,000 IOPSを下回ります。</strong>フラッシュのレイテンシ（コンシューマ向けNVMeで約1ms）が偉大な平準化装置であり、ストレージスタックがどれほど巧妙でも、デバイスがフラッシュできる速度より速くは書き込めません。前述の実験での劇的な差（17k vs 400 IOPS）の大部分は、<em>どの構成が書き込みごとにフラッシュするのか</em>、どの構成がバッチして先送りするのか、の違いなのです。</p>
 
-<p>(Note: these flush latencies are not a QEMU artifact &mdash; the same test on the host NVMe SSD shows ~1.1ms flush latency, typical for consumer TLC/QLC SSDs.)</p>
+<p>（補足：これらのフラッシュレイテンシはQEMUによるアーティファクトではありません。ホストのNVMe SSD上で同じテストを行っても約1.1msのフラッシュレイテンシが観測されます。これはコンシューマ向けTLC/QLC SSDとして典型的な値です。）</p>
 
-<p>Thin snapshots use <strong>Redirect-On-Write (ROW)</strong> &mdash; instead of copying old data, new data goes to a fresh location and the metadata pointer is updated. However, look closely at the thin panel after the snapshot: there are <strong>green dots (reads)</strong> appearing. dm-thin's chunk size is 64KB, but fio writes 4KB. When a 4KB write hits a shared 64KB chunk, dm-thin must read the entire chunk, copy it to a new location, then apply the 4KB change &mdash; effectively COW at the chunk level. If the chunk size matched the write size (e.g. <code>lvcreate -T ... -c 4k</code>), these reads would disappear entirely.</p>
+<p>thinスナップショットは<strong>Redirect-On-Write（ROW）</strong>を採用しています。古いデータをコピーする代わりに、新しいデータは新しい場所へ書き込まれ、メタデータのポインタが更新されます。ただし、スナップショット後のthinパネルをよく見ると、<strong>緑のドット（読み取り）</strong>が現れています。dm-thinのチャンクサイズは64KBですが、fioの書き込みは4KBです。共有されている64KBチャンクに4KBの書き込みが当たると、dm-thinはチャンク全体を読み出して新しい場所へコピーし、そのうえで4KBの変更を適用しなければなりません。事実上、チャンクレベルのCOWです。チャンクサイズを書き込みサイズに合わせれば（例：<code>lvcreate -T ... -c 4k</code>）、これらの読み取りは完全に消えます。</p>
 
 <!-- ============================================================ -->
-<h2>Experiment 3: ZFS vs Btrfs &mdash; COW Filesystems</h2>
+<h2>実験3：ZFS vs Btrfs &mdash; COWファイルシステム</h2>
 
-<p>Both ZFS and Btrfs are copy-on-write filesystems. Every write goes to a new location, and metadata trees are updated with new pointers. But the implementation details lead to very different I/O patterns.</p>
+<p>ZFSもBtrfsもcopy-on-writeファイルシステムです。すべての書き込みは新しい場所へ行われ、メタデータツリーは新しいポインタで更新されます。しかし実装の細部の違いが、まったく異なるI/Oパターンを生み出します。</p>
 
 <div class="diagram">
 <svg width="340" height="210" viewBox="0 0 340 210" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -364,83 +365,83 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 </svg>
 </div>
 
-<p><strong>ZFS</strong> organizes data in fixed-size records (default 128KB). When you write 4KB, ZFS must COW the entire 128KB record to a new location &mdash; a 32x amplification at the data level alone. It also updates a Merkle-like tree of block pointers (indirect blocks, dnodes, uberblock), all COW'd as well. Writes are cached in the ARC (ignoring O_DIRECT) and flushed in Transaction Groups (TXGs) every ~5 seconds as large sequential batches spread across the disk's metaslabs.</p>
+<p><strong>ZFS</strong>は、データを固定サイズのレコード（デフォルト128KB）として管理します。4KBを書き込むと、ZFSは128KBのレコード全体を新しい場所へCOWしなければなりません。データレベルだけですでに32倍の増幅です。加えて、ブロックポインタのMerkleツリー的な構造（間接ブロック、dnode、uberblock）も更新され、それらもすべてCOWされます。書き込みはARCにキャッシュされ（O_DIRECTは無視されます）、約5秒ごとのトランザクショングループ（TXG）で、ディスクのmetaslab全体に広がる大きなシーケンシャルバッチとしてフラッシュされます。</p>
 
-<p><strong>Btrfs</strong> uses variable-size extents. A 4KB write allocates exactly a 4KB extent at the next free position in the block group. The old extent is freed (or kept if a snapshot references it). Metadata updates (extent tree + checksum tree) are COW'd separately as 16KB blocks. The allocator advances sequentially through the block group, producing a compact, nearly sequential physical write pattern with ~1.0x amplification.</p>
+<p><strong>Btrfs</strong>は可変サイズのエクステントを使います。4KBの書き込みは、ブロックグループ内の次の空き位置に、ちょうど4KBのエクステントを割り当てます。古いエクステントは解放されます（スナップショットが参照していれば保持されます）。メタデータ更新（extentツリー + チェックサムツリー）は、16KBブロックとして別途COWされます。アロケータはブロックグループ内を順に前進するため、コンパクトでほぼシーケンシャルな物理書き込みパターンとなり、増幅は約1.0倍にとどまります。</p>
 
 <div id="viz-cowfs" class="viz-wrap"></div>
 
 <table>
 <tr><th></th><th>ZFS</th><th>Btrfs</th></tr>
-<tr><td>fio logical writes</td><td class="num">~450 MB</td><td class="num">~445 MB</td></tr>
-<tr><td>Physical writes</td><td class="num"><strong>10,449 MB</strong></td><td class="num">~445 MB</td></tr>
-<tr><td>Write amplification</td><td class="num"><strong>~23x</strong></td><td class="num">~1.0x</td></tr>
-<tr><td>I/O pattern</td><td>Spread across entire 10GB disk</td><td>Sequential, single region</td></tr>
+<tr><td>fioの論理書き込み量</td><td class="num">~450 MB</td><td class="num">~445 MB</td></tr>
+<tr><td>物理書き込み量</td><td class="num"><strong>10,449 MB</strong></td><td class="num">~445 MB</td></tr>
+<tr><td>書き込み増幅率</td><td class="num"><strong>~23x</strong></td><td class="num">~1.0x</td></tr>
+<tr><td>I/Oパターン</td><td>10GBディスク全体に分散</td><td>シーケンシャル、単一領域</td></tr>
 </table>
 
-<h3>Why ZFS writes 23x more than requested</h3>
-<p>ZFS's default <code>recordsize=128KB</code> is the culprit. When fio writes 4KB to a record, ZFS COWs the <strong>entire 128KB record</strong> to a new location. That's a 32x data amplification before metadata is even counted.</p>
+<h3>なぜZFSは要求の23倍も書き込むのか</h3>
+<p>原因はZFSのデフォルト設定 <code>recordsize=128KB</code> です。fioがレコードに4KBを書き込むと、ZFSは<strong>128KBのレコード全体</strong>を新しい場所へCOWします。メタデータを数えに入れる前の時点で、すでに32倍のデータ増幅です。</p>
 
-<p>Additionally, ZFS batches writes into <strong>Transaction Groups (TXGs)</strong> that flush approximately every 5 seconds. It ignores <code>O_DIRECT</code> and caches everything in the ARC, then writes large sequential batches across the disk's metaslab allocator. This is why the ZFS panel shows writes scattered across the full 10GB &mdash; the metaslab allocator intentionally distributes writes for wear leveling.</p>
+<p>さらにZFSは、書き込みを<strong>トランザクショングループ（TXG）</strong>にまとめ、およそ5秒ごとにフラッシュします。<code>O_DIRECT</code> を無視してすべてをARCにキャッシュし、その後、ディスクのmetaslabアロケータを介して大きなシーケンシャルバッチを書き出します。ZFSのパネルで書き込みが10GB全域に散らばって見えるのはこのためで、metaslabアロケータはウェアレベリングのために意図的に書き込みを分散させています。</p>
 
 <div class="callout">
-<strong>Setting <code>recordsize=4k</code></strong> would eliminate the record-level amplification for this workload, but would hurt sequential read performance. This is a fundamental ZFS tradeoff for mixed workloads.
+<strong><code>recordsize=4k</code> を設定すれば</strong>、このワークロードにおけるレコードレベルの増幅は解消されますが、シーケンシャルリードの性能は悪化します。これは混合ワークロードにおけるZFSの根本的なトレードオフです。
 </div>
 
-<h3>Why Btrfs is efficient here</h3>
-<p>Btrfs uses extent-based allocation. A 4KB COW write produces a 4KB extent at a new location &mdash; 1:1. With <code>fallocate=none</code> (no preallocation), every write is a fresh allocation, and the block allocator hands out sectors sequentially. The result is <strong>nearly zero write amplification</strong> and a perfectly sequential physical I/O pattern, even though fio is issuing random logical writes.</p>
+<h3>なぜBtrfsはここで効率的なのか</h3>
+<p>Btrfsはエクステントベースの割り当てを行います。4KBのCOW書き込みは、新しい場所に4KBのエクステントを1つ生み出します。1:1です。<code>fallocate=none</code>（事前割り当てなし）では、すべての書き込みが新規割り当てになり、ブロックアロケータはセクタを順番に払い出します。その結果、fioが論理的にはランダムな書き込みを発行しているにもかかわらず、<strong>write amplificationはほぼゼロ</strong>で、物理I/Oパターンは完全にシーケンシャルになります。</p>
 
 <div class="callout">
-<strong>Note on fio settings:</strong> By default, fio preallocates the test file with <code>fallocate()</code> or sequential writes before starting random I/O. On Btrfs, this creates preallocated extents that make subsequent COW writes appear scattered (as they land near the original extent locations). We use <code>--fallocate=none --create_on_open=1</code> to disable this and observe the true COW allocation pattern.
+<strong>fioの設定に関する注意：</strong>fioはデフォルトで、ランダムI/Oを開始する前にテストファイルを <code>fallocate()</code> またはシーケンシャル書き込みで事前確保します。Btrfsでは、この事前割り当てエクステントのせいで、以降のCOW書き込みが（元のエクステント位置の近くに着地するため）散らばって見えてしまいます。本実験ではこれを無効化し、本来のCOW割り当てパターンを観察するために <code>--fallocate=none --create_on_open=1</code> を使用しています。
 </div>
 
 <!-- ============================================================ -->
-<h2>Experiment 4: Snapshots on COW Filesystems</h2>
+<h2>実験4：COWファイルシステムでのスナップショット</h2>
 
-<p>Unlike LVM, ZFS and Btrfs are already COW. Does taking a snapshot change anything?</p>
+<p>LVMと違い、ZFSとBtrfsはもともとCOWです。では、スナップショットを取ると何か変わるのでしょうか？</p>
 
 <div id="viz-cowfs-snap" class="viz-wrap"></div>
 
-<h3>Three phases</h3>
+<h3>3つのフェーズ</h3>
 <ol style="margin: 12px 0 12px 24px; color: var(--fg);">
-  <li><strong>Phase 1</strong> (10s): Fresh file, initial writes</li>
-  <li><strong>Phase 2</strong> (30s): After snapshot #1 &mdash; old blocks pinned, cannot be reused</li>
-  <li><strong>Phase 3</strong> (10s): After snapshot #2 &mdash; intermediate blocks from Phase 2 partially reclaimable</li>
+  <li><strong>Phase 1</strong>（10秒）：新規ファイルへの初回書き込み</li>
+  <li><strong>Phase 2</strong>（30秒）：スナップショット#1の後 &mdash; 古いブロックはピン留めされ、再利用できない</li>
+  <li><strong>Phase 3</strong>（10秒）：スナップショット#2の後 &mdash; Phase 2の中間ブロックの一部が再利用可能に</li>
 </ol>
 
-<p>The I/O throughput barely changes across phases &mdash; no 37x slowdown like LVM. But the <strong>allocation pattern</strong> changes dramatically on Btrfs:</p>
+<p>フェーズをまたいでもI/Oスループットはほとんど変わりません。LVMのような37倍のスローダウンは起きないのです。しかしBtrfsでは、<strong>割り当てパターン</strong>が劇的に変化します：</p>
 
 <table>
-<tr><th>Phase</th><th>Btrfs sequential %</th><th>Explanation</th></tr>
-<tr><td>Phase 1</td><td class="num"><strong>100%</strong></td><td>Fresh file, no preallocation &rarr; allocator assigns blocks sequentially</td></tr>
-<tr><td>Phase 2</td><td class="num"><strong>100%</strong></td><td>Snapshot pins all blocks &rarr; no reuse possible &rarr; pure sequential allocation</td></tr>
-<tr><td>Phase 3</td><td class="num">70%</td><td>Phase 2's intermediate COW blocks (not pinned by snap1) become reusable</td></tr>
+<tr><th>Phase</th><th>Btrfsのシーケンシャル率</th><th>説明</th></tr>
+<tr><td>Phase 1</td><td class="num"><strong>100%</strong></td><td>新規ファイル、事前割り当てなし &rarr; アロケータがブロックを順番に割り当てる</td></tr>
+<tr><td>Phase 2</td><td class="num"><strong>100%</strong></td><td>スナップショットが全ブロックをピン留め &rarr; 再利用不可 &rarr; 純粋なシーケンシャル割り当て</td></tr>
+<tr><td>Phase 3</td><td class="num">70%</td><td>Phase 2の中間COWブロック（snap1にピン留めされていないもの）が再利用可能になる</td></tr>
 </table>
 
-<p>Look closely at the Btrfs panel in Phase 3: instead of a single sequential line, the writes split into multiple bands across the disk. The allocator is pulling free blocks from several partially-freed block groups (where Phase 2's intermediate COW data was released) while simultaneously advancing a sequential write frontier at the top. This is what COW fragmentation looks like with multiple snapshots &mdash; throughput is unaffected, but physical layout becomes scattered.</p>
+<p>Phase 3のBtrfsパネルをよく見てください。1本のシーケンシャルなラインではなく、書き込みがディスク上の複数のバンドに分かれています。アロケータは、部分的に解放された複数のブロックグループ（Phase 2の中間COWデータが解放された場所）から空きブロックを引き出しつつ、同時に上部でシーケンシャルな書き込みフロンティアを前進させています。これが、複数のスナップショットを抱えたCOWのフラグメンテーションの姿です。スループットには影響しませんが、物理レイアウトは散らばっていきます。</p>
 
 <div class="callout warn">
-<strong>The hidden cost of COW snapshots:</strong> Performance doesn't drop, but disk consumption grows. Since old blocks can't be freed, every COW write consumes new space. ZFS at 96% pool usage + snapshots = writes stop entirely (<code>ENOSPC</code>). The "keep pools under 80%" rule exists for this reason.
+<strong>COWスナップショットの隠れたコスト：</strong>性能は落ちませんが、ディスク消費量が増え続けます。古いブロックを解放できないため、COW書き込みのたびに新しい領域を消費するのです。プール使用率96%のZFS + スナップショット = 書き込みが完全に停止します（<code>ENOSPC</code>）。「プールは80%未満に保て」というルールはこのために存在します。
 </div>
 
 <!-- ============================================================ -->
-<h2>Key Takeaways</h2>
+<h2>まとめ</h2>
 
 <table>
-<tr><th>Storage Stack</th><th>Write Amplification (4K randwrite)</th><th>Snapshot Overhead</th></tr>
-<tr><td>LVM Linear</td><td class="num">1.0x</td><td>N/A</td></tr>
-<tr><td>LVM Thin</td><td class="num">~1.5x (metadata)</td><td>ROW &mdash; minimal</td></tr>
-<tr><td>LVM Snapshot (classic)</td><td class="num">1.0x before, <strong>3x+ after</strong></td><td><strong>COW R+W+W &mdash; catastrophic</strong></td></tr>
-<tr><td>Btrfs</td><td class="num">~1.0x</td><td>No slowdown, but space grows</td></tr>
-<tr><td>ZFS (recordsize=128k)</td><td class="num"><strong>~23x</strong></td><td>No slowdown, but space grows</td></tr>
+<tr><th>ストレージスタック</th><th>書き込み増幅率（4Kランダムライト）</th><th>スナップショットのオーバーヘッド</th></tr>
+<tr><td>LVMリニア</td><td class="num">1.0x</td><td>N/A</td></tr>
+<tr><td>LVM thin</td><td class="num">~1.5x（メタデータ）</td><td>ROW &mdash; 最小限</td></tr>
+<tr><td>LVMスナップショット（従来型）</td><td class="num">スナップ前1.0x、<strong>後は3x以上</strong></td><td><strong>COW R+W+W &mdash; 壊滅的</strong></td></tr>
+<tr><td>Btrfs</td><td class="num">~1.0x</td><td>速度低下なし、ただし消費容量は増加</td></tr>
+<tr><td>ZFS（recordsize=128k）</td><td class="num"><strong>~23x</strong></td><td>速度低下なし、ただし消費容量は増加</td></tr>
 </table>
 
 <!-- ============================================================ -->
-<h2>Reproducing This</h2>
+<h2>再現方法</h2>
 
-<p>All experiments ran in a QEMU/KVM VM with two 10GB virtio disks. The full setup is in the <a href="https://github.com/osjupiter/block-trace-viz">repository</a>.</p>
+<p>すべての実験は、10GBのvirtioディスク2台を備えたQEMU/KVM VMで実行しました。完全なセットアップは<a href="https://github.com/osjupiter/block-trace-viz">リポジトリ</a>にあります。</p>
 
-<p>The VM uses QEMU/KVM with Ubuntu 24.04, two 10GB virtio disks, 4 vCPUs, and 4GB RAM. Cloud-init provisions a <code>dev</code> user with <code>build-essential</code>, <code>fio</code>, <code>blktrace</code>, <code>lvm2</code>, <code>zfsutils-linux</code>, and <code>btrfs-progs</code>.</p>
+<p>VMはQEMU/KVM上のUbuntu 24.04で、10GBのvirtioディスク2台、4 vCPU、4GB RAMという構成です。cloud-initで <code>dev</code> ユーザーをプロビジョニングし、<code>build-essential</code>、<code>fio</code>、<code>blktrace</code>、<code>lvm2</code>、<code>zfsutils-linux</code>、<code>btrfs-progs</code> をインストールします。</p>
 
 <pre><code># Experiment scripts (run inside VM as root)
 scripts/run_linear.sh       # LVM linear + snapshot
@@ -456,8 +457,8 @@ blkparse -i trace -q | awk '$6=="C" && $7~/[WR]/{
 }'</code></pre>
 
 <footer>
-  Measured with <code>blktrace</code> and <code>fio</code> in a QEMU/KVM VM.
-  <a href="https://github.com/osjupiter/block-trace-viz">Source on GitHub</a>
+  計測は <code>blktrace</code> と <code>fio</code> を使用し、QEMU/KVM VM内で実施しました。
+  <a href="https://github.com/osjupiter/block-trace-viz">ソースはGitHubにあります</a>
 </footer>
 
 </div>
