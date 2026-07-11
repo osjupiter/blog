@@ -67,6 +67,10 @@ td { color: var(--fg); }
 footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: var(--fg2); font-size: 0.85em; text-align: center; }
 .lang-switch { display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 0.8em; color: #555; margin-bottom: 16px; }
 .lang-switch strong { color: #ccc; font-weight: 600; }
+.fig { margin: 24px 0; }
+.fig svg { width: 100%; height: auto; display: block; background: var(--bg2); border: 1px solid #222; border-radius: 6px; }
+.fig text { font-family: 'JetBrains Mono', 'Fira Code', monospace; }
+.figcap { font-size: 0.85em; color: var(--fg2); margin-top: 8px; text-align: center; }
 </style>
 </head>
 <body>
@@ -88,17 +92,51 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 
 <p>エレガントなのはデータプレーンです。HW キューごとにサーバは専用スレッドを1本立て、それぞれが自分の io_uring を持ちます。起動時にそのスレッドは、キュー内の全タグ(リクエストスロット)について <code>FETCH_REQ</code> という uring_cmd を <code>/dev/ublkcN</code> に対して発行します。このコマンドは完了しません — 待つのです。そして最初の fetch こそがキューとスレッドを<em>紐づける</em>操作です: ある (queue, tag) を fetch したスレッドがそのスロットのデーモンになり、以降そのスロットへのコマンドを発行できるのはそのスレッドだけになります。</p>
 
-<pre><code> app ──► /dev/ublkbN ──► blk-mq ──► ublk_drv               [カーネル]
-                                       │ (queue, tag) で待っている
-                                       │ FETCH_REQ を完了させる
- ──────────────────────────────────────┼─────────────────────────
-                                       ▼             [ユーザ空間]
-                       キュースレッド + 専用 io_uring
-                         1. リクエストディスクリプタを読む (mmap 済み)
-                         2. バッキング IO を行う — これも io_uring 操作
-                         3. COMMIT_AND_FETCH_REQ(結果) を発行
-                            └─ /dev/ublkbN のリクエストを完了させ、
-                               同じタグを1ステップで再アームする</code></pre>
+<div class="fig">
+<svg viewBox="0 0 720 356" role="img" aria-label="ublk のリクエストがアプリからカーネルを経てユーザ空間のキュースレッドに届き、戻るまでの流れ">
+  <defs>
+    <marker id="ar1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#888"/>
+    </marker>
+  </defs>
+  <line x1="0" y1="150" x2="720" y2="150" stroke="#333" stroke-dasharray="6 5"/>
+  <text x="20" y="140" fill="#666" font-size="12">[カーネル]</text>
+  <text x="20" y="172" fill="#666" font-size="12">[ユーザ空間]</text>
+
+  <rect x="24" y="36" width="64" height="32" rx="5" fill="#1a1a1a" stroke="#3a3a3a"/>
+  <text x="56" y="57" text-anchor="middle" fill="#ddd" font-size="13">app</text>
+  <rect x="124" y="36" width="128" height="32" rx="5" fill="#1a1a1a" stroke="#3a3a3a"/>
+  <text x="188" y="57" text-anchor="middle" fill="#ddd" font-size="13">/dev/ublkbN</text>
+  <rect x="288" y="36" width="150" height="32" rx="5" fill="#1a1a1a" stroke="#3a3a3a"/>
+  <text x="363" y="57" text-anchor="middle" fill="#ddd" font-size="12">blk-mq (queue, tag)</text>
+  <rect x="474" y="36" width="100" height="32" rx="5" fill="#1a1a1a" stroke="#3a3a3a"/>
+  <text x="524" y="57" text-anchor="middle" fill="#ddd" font-size="13">ublk_drv</text>
+
+  <line x1="90" y1="52" x2="118" y2="52" stroke="#888" marker-end="url(#ar1)"/>
+  <line x1="254" y1="52" x2="282" y2="52" stroke="#888" marker-end="url(#ar1)"/>
+  <line x1="440" y1="52" x2="468" y2="52" stroke="#888" marker-end="url(#ar1)"/>
+
+  <line x1="558" y1="70" x2="558" y2="202" stroke="var(--accent)" marker-end="url(#ar1)"/>
+  <text x="570" y="104" fill="var(--accent)" font-size="12">FETCH_REQ が完了</text>
+  <text x="570" y="121" fill="var(--accent)" font-size="12">(queue, tag) の分</text>
+
+  <line x1="490" y1="206" x2="490" y2="74" stroke="var(--green)" marker-end="url(#ar1)"/>
+  <text x="478" y="104" text-anchor="end" fill="var(--green)" font-size="12">COMMIT_AND_FETCH_REQ(結果)</text>
+  <text x="478" y="121" text-anchor="end" fill="var(--green)" font-size="12">完了 + タグ再アーム</text>
+
+  <rect x="380" y="208" width="276" height="122" rx="6" fill="#151515" stroke="#3a3a3a"/>
+  <text x="518" y="233" text-anchor="middle" fill="#eee" font-size="13">キュースレッド + 専用 io_uring</text>
+  <text x="396" y="262" fill="#bbb" font-size="12">1. ディスクリプタを読む (mmap)</text>
+  <text x="396" y="284" fill="#bbb" font-size="12">2. バッキング IO を行う</text>
+  <text x="396" y="306" fill="#bbb" font-size="12">3. COMMIT_AND_FETCH_REQ</text>
+
+  <rect x="24" y="238" width="180" height="62" rx="5" fill="#1a1a1a" stroke="#3a3a3a"/>
+  <text x="114" y="274" text-anchor="middle" fill="#ddd" font-size="11">バッキングファイル/デバイス</text>
+  <line x1="374" y1="269" x2="212" y2="269" stroke="#888" marker-start="url(#ar1)" marker-end="url(#ar1)"/>
+  <text x="293" y="259" text-anchor="middle" fill="#888" font-size="11">io_uring read/write</text>
+</svg>
+<div class="figcap">IO 1つ = 往復1回。待っていた fetch が正しいスレッドだけを起こし、commit が応答とタグの再アームを1ステップで行う。</div>
+</div>
 
 <p>アプリの IO が <code>/dev/ublkbN</code> に来ると、blk-mq がキューと空きタグを選び、ublk_drv がその (queue, tag) で待っていた fetch を完了させます — ユーザ空間側のルーティングロジックはゼロのまま、正しいサーバスレッドだけが起きるわけです。スレッドはディスクリプタを読み、バッキング IO を行い(ublkera の場合: 同じリング上でバッキングファイルへの io_uring 操作をもう1発)、<code>COMMIT_AND_FETCH_REQ</code> で応答します。これはブロックリクエストの完了とタグの再アームを1ステップでやります。定常状態はキューごとにリング1本のタイトなループです: IO ごとの syscall はバッチされた <code>io_uring_enter</code> 以外になく、スレッド間の受け渡しもなく、キュー間で共有するロックもありません。</p>
 
@@ -205,12 +243,96 @@ diff diff-hash.txt diff-era.txt \
 
 <p>ただし1デバイスの中では、既定はキュー1本 — データパスのユーザ空間側が1スレッドに直列化され、ホットなデバイスはおよそ1コアを張り付かせます。最初は「ublk の限界か」と思いましたが、違いました: ublk デバイスは <code>nr_hw_queues</code> パラメータ付きで作成でき、blk-mq が発行元 CPU をキューに割り当て、キューごとにサーバスレッドが立ちます。手を伸ばせば届くデフォルトです(ublkera では <code>add -q 4</code>)。</p>
 
-<pre><code> nr_hw_queues = 1 (既定)              nr_hw_queues = 4
-                                      CPU0 ──► q0 ──► スレッド0 + ring
- CPU0 ─┐                              CPU1 ──► q1 ──► スレッド1 + ring
- CPU1 ─┼──► q0 ──► スレッド0 + ring   CPU2 ──► q2 ──► スレッド2 + ring
- CPU2 ─┤    (ユーザ空間側は           CPU3 ──► q3 ──► スレッド3 + ring
- CPU3 ─┘     最大 ~1 コア)                (CPU に合わせてファンアウト)</code></pre>
+<p>ここで効いているノブは2つあり、それぞれ別のものをスケールさせます。<strong>depth</strong> はキューあたりのタグスロット数 — 1本のスレッドで同時に in-flight にできるコマンド数です。<strong>キュー数</strong>はスレッドの本数 — デバイスの処理に使える CPU の量です:</p>
+
+<div class="fig">
+<svg viewBox="0 0 680 404" role="img" aria-label="キューは depth 個のタグスロットを1スレッドが消費する。キューを増やすとスレッドと CPU が増える">
+  <defs>
+    <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#888"/>
+    </marker>
+  </defs>
+
+  <text x="24" y="30" fill="#ccc" font-size="13">キュー1本 = depth 個のタグスロット = 同時に処理できるコマンド数</text>
+  <rect x="24" y="44" width="420" height="64" rx="6" fill="#151515" stroke="#3a3a3a"/>
+  <rect x="40"  y="63" width="26" height="26" rx="3" fill="var(--accent)" opacity="0.85"/>
+  <rect x="72"  y="63" width="26" height="26" rx="3" fill="#222" stroke="#444"/>
+  <rect x="104" y="63" width="26" height="26" rx="3" fill="var(--accent)" opacity="0.85"/>
+  <rect x="136" y="63" width="26" height="26" rx="3" fill="var(--accent)" opacity="0.85"/>
+  <rect x="168" y="63" width="26" height="26" rx="3" fill="#222" stroke="#444"/>
+  <rect x="200" y="63" width="26" height="26" rx="3" fill="#222" stroke="#444"/>
+  <rect x="232" y="63" width="26" height="26" rx="3" fill="var(--accent)" opacity="0.85"/>
+  <rect x="264" y="63" width="26" height="26" rx="3" fill="#222" stroke="#444"/>
+  <rect x="296" y="63" width="26" height="26" rx="3" fill="#222" stroke="#444"/>
+  <rect x="328" y="63" width="26" height="26" rx="3" fill="#222" stroke="#444"/>
+  <rect x="360" y="63" width="26" height="26" rx="3" fill="#222" stroke="#444"/>
+  <rect x="392" y="63" width="26" height="26" rx="3" fill="#222" stroke="#444"/>
+  <text x="234" y="128" text-anchor="middle" fill="#888" font-size="12">tag 0 … tag 63  (queue_depth = 64、■ = in flight)</text>
+  <line x1="448" y1="76" x2="484" y2="76" stroke="#888" marker-end="url(#ar2)"/>
+  <rect x="490" y="52" width="166" height="48" rx="5" fill="#1a1a1a" stroke="var(--accent)"/>
+  <text x="573" y="73" text-anchor="middle" fill="#ddd" font-size="12">thread + io_uring</text>
+  <text x="573" y="91" text-anchor="middle" fill="#888" font-size="11">64 タグを1本で消費</text>
+  <text x="24" y="152" fill="#888" font-size="12">depth を上げる → 同じスレッドのまま並行度が上がる (CPU は増えない)</text>
+
+  <text x="24" y="196" fill="#ccc" font-size="13">キュー数 = スレッド数 = CPU のノブ</text>
+
+  <text x="24" y="224" fill="#999" font-size="12">nr_hw_queues = 1</text>
+  <rect x="24" y="236" width="58" height="26" rx="4" fill="#1a1a1a" stroke="#3a3a3a"/>
+  <text x="53" y="253" text-anchor="middle" fill="#bbb" font-size="11">CPU0</text>
+  <rect x="24" y="270" width="58" height="26" rx="4" fill="#1a1a1a" stroke="#3a3a3a"/>
+  <text x="53" y="287" text-anchor="middle" fill="#bbb" font-size="11">CPU1</text>
+  <rect x="24" y="304" width="58" height="26" rx="4" fill="#1a1a1a" stroke="#3a3a3a"/>
+  <text x="53" y="321" text-anchor="middle" fill="#bbb" font-size="11">CPU2</text>
+  <rect x="24" y="338" width="58" height="26" rx="4" fill="#1a1a1a" stroke="#3a3a3a"/>
+  <text x="53" y="355" text-anchor="middle" fill="#bbb" font-size="11">CPU3</text>
+  <line x1="84" y1="249" x2="146" y2="298" stroke="#666"/>
+  <line x1="84" y1="283" x2="146" y2="299" stroke="#666"/>
+  <line x1="84" y1="317" x2="146" y2="301" stroke="#666"/>
+  <line x1="84" y1="351" x2="146" y2="302" stroke="#666"/>
+  <rect x="150" y="284" width="56" height="32" rx="4" fill="#151515" stroke="#3a3a3a"/>
+  <text x="178" y="304" text-anchor="middle" fill="#ddd" font-size="12">q0</text>
+  <line x1="208" y1="300" x2="242" y2="300" stroke="#888" marker-end="url(#ar2)"/>
+  <rect x="248" y="280" width="110" height="40" rx="5" fill="#1a1a1a" stroke="var(--accent)"/>
+  <text x="303" y="304" text-anchor="middle" fill="#ddd" font-size="12">thread 0</text>
+  <text x="24" y="390" fill="#888" font-size="12">ユーザ空間側は最大 ~1 コア</text>
+
+  <text x="392" y="224" fill="#999" font-size="12">nr_hw_queues = 4</text>
+  <rect x="392" y="236" width="58" height="26" rx="4" fill="#1a1a1a" stroke="#3a3a3a"/>
+  <text x="421" y="253" text-anchor="middle" fill="#bbb" font-size="11">CPU0</text>
+  <line x1="452" y1="249" x2="470" y2="249" stroke="#888" marker-end="url(#ar2)"/>
+  <rect x="476" y="236" width="44" height="26" rx="4" fill="#151515" stroke="#3a3a3a"/>
+  <text x="498" y="253" text-anchor="middle" fill="#ddd" font-size="11">q0</text>
+  <line x1="522" y1="249" x2="540" y2="249" stroke="#888" marker-end="url(#ar2)"/>
+  <rect x="546" y="236" width="110" height="26" rx="4" fill="#1a1a1a" stroke="var(--accent)"/>
+  <text x="601" y="253" text-anchor="middle" fill="#ddd" font-size="11">thread 0</text>
+  <rect x="392" y="270" width="58" height="26" rx="4" fill="#1a1a1a" stroke="#3a3a3a"/>
+  <text x="421" y="287" text-anchor="middle" fill="#bbb" font-size="11">CPU1</text>
+  <line x1="452" y1="283" x2="470" y2="283" stroke="#888" marker-end="url(#ar2)"/>
+  <rect x="476" y="270" width="44" height="26" rx="4" fill="#151515" stroke="#3a3a3a"/>
+  <text x="498" y="287" text-anchor="middle" fill="#ddd" font-size="11">q1</text>
+  <line x1="522" y1="283" x2="540" y2="283" stroke="#888" marker-end="url(#ar2)"/>
+  <rect x="546" y="270" width="110" height="26" rx="4" fill="#1a1a1a" stroke="var(--accent)"/>
+  <text x="601" y="287" text-anchor="middle" fill="#ddd" font-size="11">thread 1</text>
+  <rect x="392" y="304" width="58" height="26" rx="4" fill="#1a1a1a" stroke="#3a3a3a"/>
+  <text x="421" y="321" text-anchor="middle" fill="#bbb" font-size="11">CPU2</text>
+  <line x1="452" y1="317" x2="470" y2="317" stroke="#888" marker-end="url(#ar2)"/>
+  <rect x="476" y="304" width="44" height="26" rx="4" fill="#151515" stroke="#3a3a3a"/>
+  <text x="498" y="321" text-anchor="middle" fill="#ddd" font-size="11">q2</text>
+  <line x1="522" y1="317" x2="540" y2="317" stroke="#888" marker-end="url(#ar2)"/>
+  <rect x="546" y="304" width="110" height="26" rx="4" fill="#1a1a1a" stroke="var(--accent)"/>
+  <text x="601" y="321" text-anchor="middle" fill="#ddd" font-size="11">thread 2</text>
+  <rect x="392" y="338" width="58" height="26" rx="4" fill="#1a1a1a" stroke="#3a3a3a"/>
+  <text x="421" y="355" text-anchor="middle" fill="#bbb" font-size="11">CPU3</text>
+  <line x1="452" y1="351" x2="470" y2="351" stroke="#888" marker-end="url(#ar2)"/>
+  <rect x="476" y="338" width="44" height="26" rx="4" fill="#151515" stroke="#3a3a3a"/>
+  <text x="498" y="355" text-anchor="middle" fill="#ddd" font-size="11">q3</text>
+  <line x1="522" y1="351" x2="540" y2="351" stroke="#888" marker-end="url(#ar2)"/>
+  <rect x="546" y="338" width="110" height="26" rx="4" fill="#1a1a1a" stroke="var(--accent)"/>
+  <text x="601" y="355" text-anchor="middle" fill="#ddd" font-size="11">thread 3</text>
+  <text x="392" y="390" fill="#888" font-size="12">CPU の数だけスケール</text>
+</svg>
+<div class="figcap">depth は1スレッドあたりの並行度を、キュー数は CPU に広がるスレッド数をスケールさせる。</div>
+</div>
 
 <p>正確に言えば、キュースレッドが CPU に 1:1 で固定されるわけではありません — スケジューラは自由にスレッドを移動できます。これはキャパシティの話です: 1本のスレッドが燃やせるのは最大1コアなので、キュー1本は1デバイスのユーザ空間側を CPU 約100% で頭打ちにします。忙しい発行元 CPU の数だけキューを与えれば、この頭打ちは消えます。</p>
 
