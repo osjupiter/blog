@@ -241,6 +241,18 @@ diff diff-hash.txt diff-era.txt \
 
 <p>驚きは真ん中の列です: 約 1.25&nbsp;MiB を超えると<em>別の</em>制限に当たります — ブロック層のソフト上限 <code>max_sectors_kb</code> で、これは ublk に限らず全ブロックデバイスで既定 1280&nbsp;KiB です。HW 上限はバッファに合わせて伸び続けますが、実効リクエストサイズは sysfs でソフト上限も上げない限り(<code>echo N &gt; /sys/block/ublkbN/queue/max_sectors_kb</code>)伸びません。ノブは2つ、持ち主も2人。</p>
 
+<p>これが大きなシーケンシャルライトにとって何を意味するか。fio で 1&nbsp;MiB シーケンシャルライト(<code>direct=1</code>、バッキングは virtio ディスク)を発行し、ublk デバイスとバッキングデバイス両方の <code>/sys/block/*/stat</code> をサンプリングして実測しました:</p>
+
+<table>
+<tr><th>構成</th><th class="num">fio 発行</th><th class="num">ublk デバイス側</th><th class="num">バッキング側</th></tr>
+<tr><td><code>-b 512K</code>(既定)</td><td class="num">1,248 IOPS @1MiB</td><td class="num"><strong>2,464 w/s @512KiB</strong></td><td class="num">2,464 w/s @512KiB</td></tr>
+<tr><td><code>-b 1M</code></td><td class="num">1,822 IOPS @1MiB</td><td class="num">1,826 w/s @1024KiB</td><td class="num">1,826 w/s @1024KiB</td></tr>
+</table>
+
+<p>既定バッファではカーネルが 1&nbsp;MiB write を毎回2つに割ります: リクエスト数ベースの IOPS は2倍、スループットへの影響はなし、そしてバッキングデバイスには分割後とまったく同じリクエスト列が届きます — 件数がリクエスト単位で一致していて、「1:1 パススルー」という主張がそのまま実測になっています。バッファを 1&nbsp;MiB に上げれば、write はそのまま通ります。</p>
+
+<p>もう1つ、見えにくい分割要因が <code>max_segments</code> です。リクエストはバイト数だけでなく「物理的に不連続なメモリセグメントをいくつ運べるか」でも制限され、サーバが segment パラメータ(<code>UBLK_PARAM_TYPE_SEGMENT</code>)を宣言しない場合は blk-mq のデフォルト 128 が適用されます。4&nbsp;KiB ページにばらけた 1&nbsp;MiB バッファは 256 セグメント必要なので、<code>max_sectors</code> が 1&nbsp;MiB を許していても 512&nbsp;KiB で割れます — 起きるかどうかは発行側バッファの物理連続性しだい、という性質の制限です。カーネルドキュメントは ublk サーバに「segment パラメータをバックエンドに合わせよ」と指示していて、queue limit の常としてこれは <code>START_DEV</code> 前にしかできません(<code>SET_PARAMS</code> はブロックデバイスが生える前しか受理されない)。つまり attach 時に下位デバイスを見て合わせるのは daemon の仕事です。(フィールドノートの中のフィールドノート: libublk-rs は現時点で segment パラメータを表現できません — 新しめのカーネルが <code>ublk_params</code> に足したフィールドが欠けている — ので ublkera も当面デフォルトのままです。)</p>
+
 <h3>2. キューごとに 1 IO スレッド — ublk の CPU の使い方</h3>
 
 <p>ublk は<strong>キュー1本につき専用の IO スレッド(それぞれ自分の io_uring 付き)</strong>を立て、ublkera はデバイスごとにそれを持ちます。デバイスを複数生やせば、処理は必然的に複数のコアへ分散します: デバイス間で共有する実行資源はなく — era の刻印も完了ごとのアトミック演算1回だけ — CPU そのものとカーネル内の処理を除けば、デバイス同士が競合することはありません。</p>

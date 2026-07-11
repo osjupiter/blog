@@ -240,6 +240,18 @@ diff diff-hash.txt diff-era.txt \
 
 <p>The surprise in the middle column: past ~1.25&nbsp;MiB you hit a <em>different</em> limit — the block layer's soft cap <code>max_sectors_kb</code>, which defaults to 1280&nbsp;KiB for every block device, ublk or not. The hardware ceiling keeps growing with your buffer; the effective request size doesn't, unless you also raise the soft cap via sysfs (<code>echo N &gt; /sys/block/ublkbN/queue/max_sectors_kb</code>). Two knobs, two owners.</p>
 
+<p>What does this mean for a big sequential write? Measured with fio issuing 1&nbsp;MiB sequential writes (<code>direct=1</code>, virtio disk as backing), sampling <code>/sys/block/*/stat</code> on both the ublk device and the backing device:</p>
+
+<table>
+<tr><th>configuration</th><th class="num">fio issues</th><th class="num">ublk device sees</th><th class="num">backing sees</th></tr>
+<tr><td><code>-b 512K</code> (default)</td><td class="num">1,248 IOPS @1MiB</td><td class="num"><strong>2,464 w/s @512KiB</strong></td><td class="num">2,464 w/s @512KiB</td></tr>
+<tr><td><code>-b 1M</code></td><td class="num">1,822 IOPS @1MiB</td><td class="num">1,826 w/s @1024KiB</td><td class="num">1,826 w/s @1024KiB</td></tr>
+</table>
+
+<p>With the default buffer, the kernel splits every 1&nbsp;MiB write in two: request-level IOPS double, throughput is unaffected, and the backing device receives exactly the same request stream — the counts match request-for-request, which turns the "1:1 passthrough" claim from an assertion into a measurement. Raise the buffer to 1&nbsp;MiB and the write passes through whole.</p>
+
+<p>There is a second, sneakier splitter: <code>max_segments</code>. A request is capped not only in bytes but in how many discontiguous memory segments it may carry, and a server that doesn't declare segment parameters (<code>UBLK_PARAM_TYPE_SEGMENT</code>) gets the blk-mq default of 128. A 1&nbsp;MiB buffer scattered across 4&nbsp;KiB pages needs 256 segments, so it splits at 512&nbsp;KiB even where <code>max_sectors</code> would allow 1&nbsp;MiB — whether that bites depends on how physically contiguous the submitter's pages happen to be. The kernel documentation tells ublk servers to align segment parameters with the backend, and like every queue limit this must happen before <code>START_DEV</code>: <code>SET_PARAMS</code> is only accepted before the block device goes live, so looking at the backing device and matching it is the daemon's job at attach time. (A field note inside the field note: libublk-rs currently cannot express segment parameters — its <code>ublk_params</code> is missing the field newer kernels added — so ublkera inherits the default for now.)</p>
+
 <h3>2. One IO thread per queue — how ublk spends your cores</h3>
 
 <p>ublk runs <strong>one dedicated IO thread (with its own io_uring) per queue</strong>, and ublkera gives every device its own. Run several devices and the work is inherently spread across cores: devices share no execution resources — era stamping is one atomic operation per completion — so apart from the CPUs themselves and the kernel's own work, devices never contend with each other.</p>
