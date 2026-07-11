@@ -276,7 +276,7 @@ diff diff-hash.txt diff-era.txt \
   <text x="573" y="91" text-anchor="middle" fill="#888" font-size="11">drains all 64 tags</text>
   <text x="24" y="152" fill="#888" font-size="12">depth ↑ = more concurrency on the same thread (same CPU)</text>
 
-  <text x="24" y="196" fill="#ccc" font-size="13">queues = threads = the CPU knob</text>
+  <text x="24" y="196" fill="#ccc" font-size="13">queues = threads = the parallelism knob</text>
 
   <text x="24" y="224" fill="#999" font-size="12">nr_hw_queues = 1</text>
   <rect x="24" y="272" width="56" height="28" rx="4" fill="#1a1a1a" stroke="#3a3a3a"/>
@@ -290,9 +290,9 @@ diff diff-hash.txt diff-era.txt \
   <line x1="204" y1="286" x2="216" y2="286" stroke="#888" marker-end="url(#ar2)"/>
   <rect x="218" y="272" width="72" height="28" rx="4" fill="#1a1a1a" stroke="var(--accent)"/>
   <text x="254" y="290" text-anchor="middle" fill="#ddd" font-size="10">thread 0</text>
-  <line x1="290" y1="286" x2="302" y2="286" stroke="#888" marker-end="url(#ar2)"/>
-  <rect x="304" y="272" width="44" height="28" rx="4" fill="#1a1a1a" stroke="#3a3a3a"/>
-  <text x="326" y="290" text-anchor="middle" fill="#bbb" font-size="10">CPU</text>
+  <line x1="290" y1="286" x2="300" y2="286" stroke="#888" marker-end="url(#ar2)"/>
+  <rect x="302" y="272" width="54" height="28" rx="4" fill="#1a1a1a" stroke="#3a3a3a"/>
+  <text x="329" y="290" text-anchor="middle" fill="#bbb" font-size="10">core</text>
   <text x="24" y="390" fill="#888" font-size="12">userspace side ≤ ~1 core</text>
 
   <text x="368" y="224" fill="#999" font-size="12">nr_hw_queues = 4</text>
@@ -307,64 +307,62 @@ diff diff-hash.txt diff-era.txt \
   <line x1="488" y1="296" x2="500" y2="357" stroke="#666"/>
   <rect x="502" y="236" width="32" height="26" rx="4" fill="#151515" stroke="#3a3a3a"/>
   <text x="518" y="253" text-anchor="middle" fill="#ddd" font-size="10">q0</text>
-  <line x1="534" y1="249" x2="544" y2="249" stroke="#888" marker-end="url(#ar2)"/>
-  <rect x="546" y="236" width="70" height="26" rx="4" fill="#1a1a1a" stroke="var(--accent)"/>
-  <text x="581" y="253" text-anchor="middle" fill="#ddd" font-size="10">thread 0</text>
-  <line x1="616" y1="249" x2="624" y2="249" stroke="#888" marker-end="url(#ar2)"/>
-  <rect x="628" y="236" width="38" height="26" rx="4" fill="#1a1a1a" stroke="#3a3a3a"/>
-  <text x="647" y="253" text-anchor="middle" fill="#bbb" font-size="10">CPU</text>
+  <line x1="534" y1="249" x2="542" y2="249" stroke="#888" marker-end="url(#ar2)"/>
+  <rect x="544" y="236" width="62" height="26" rx="4" fill="#1a1a1a" stroke="var(--accent)"/>
+  <text x="575" y="253" text-anchor="middle" fill="#ddd" font-size="10">thread 0</text>
+  <line x1="606" y1="249" x2="614" y2="249" stroke="#888" marker-end="url(#ar2)"/>
+  <rect x="616" y="236" width="50" height="26" rx="4" fill="#1a1a1a" stroke="#3a3a3a"/>
+  <text x="641" y="253" text-anchor="middle" fill="#bbb" font-size="10">core</text>
   <rect x="502" y="272" width="32" height="26" rx="4" fill="#151515" stroke="#3a3a3a"/>
   <text x="518" y="289" text-anchor="middle" fill="#ddd" font-size="10">q1</text>
-  <line x1="534" y1="285" x2="544" y2="285" stroke="#888" marker-end="url(#ar2)"/>
-  <rect x="546" y="272" width="70" height="26" rx="4" fill="#1a1a1a" stroke="var(--accent)"/>
-  <text x="581" y="289" text-anchor="middle" fill="#ddd" font-size="10">thread 1</text>
-  <line x1="616" y1="285" x2="624" y2="285" stroke="#888" marker-end="url(#ar2)"/>
-  <rect x="628" y="272" width="38" height="26" rx="4" fill="#1a1a1a" stroke="#3a3a3a"/>
-  <text x="647" y="289" text-anchor="middle" fill="#bbb" font-size="10">CPU</text>
+  <line x1="534" y1="285" x2="542" y2="285" stroke="#888" marker-end="url(#ar2)"/>
+  <rect x="544" y="272" width="62" height="26" rx="4" fill="#1a1a1a" stroke="var(--accent)"/>
+  <text x="575" y="289" text-anchor="middle" fill="#ddd" font-size="10">thread 1</text>
+  <line x1="606" y1="285" x2="614" y2="285" stroke="#888" marker-end="url(#ar2)"/>
+  <rect x="616" y="272" width="50" height="26" rx="4" fill="#1a1a1a" stroke="#3a3a3a"/>
+  <text x="641" y="289" text-anchor="middle" fill="#bbb" font-size="10">core</text>
   <rect x="502" y="308" width="32" height="26" rx="4" fill="#151515" stroke="#3a3a3a"/>
   <text x="518" y="325" text-anchor="middle" fill="#ddd" font-size="10">q2</text>
-  <line x1="534" y1="321" x2="544" y2="321" stroke="#888" marker-end="url(#ar2)"/>
-  <rect x="546" y="308" width="70" height="26" rx="4" fill="#1a1a1a" stroke="var(--accent)"/>
-  <text x="581" y="325" text-anchor="middle" fill="#ddd" font-size="10">thread 2</text>
-  <line x1="616" y1="321" x2="624" y2="321" stroke="#888" marker-end="url(#ar2)"/>
-  <rect x="628" y="308" width="38" height="26" rx="4" fill="#1a1a1a" stroke="#3a3a3a"/>
-  <text x="647" y="325" text-anchor="middle" fill="#bbb" font-size="10">CPU</text>
+  <line x1="534" y1="321" x2="542" y2="321" stroke="#888" marker-end="url(#ar2)"/>
+  <rect x="544" y="308" width="62" height="26" rx="4" fill="#1a1a1a" stroke="var(--accent)"/>
+  <text x="575" y="325" text-anchor="middle" fill="#ddd" font-size="10">thread 2</text>
+  <line x1="606" y1="321" x2="614" y2="321" stroke="#888" marker-end="url(#ar2)"/>
+  <rect x="616" y="308" width="50" height="26" rx="4" fill="#1a1a1a" stroke="#3a3a3a"/>
+  <text x="641" y="325" text-anchor="middle" fill="#bbb" font-size="10">core</text>
   <rect x="502" y="344" width="32" height="26" rx="4" fill="#151515" stroke="#3a3a3a"/>
   <text x="518" y="361" text-anchor="middle" fill="#ddd" font-size="10">q3</text>
-  <line x1="534" y1="357" x2="544" y2="357" stroke="#888" marker-end="url(#ar2)"/>
-  <rect x="546" y="344" width="70" height="26" rx="4" fill="#1a1a1a" stroke="var(--accent)"/>
-  <text x="581" y="361" text-anchor="middle" fill="#ddd" font-size="10">thread 3</text>
-  <line x1="616" y1="357" x2="624" y2="357" stroke="#888" marker-end="url(#ar2)"/>
-  <rect x="628" y="344" width="38" height="26" rx="4" fill="#1a1a1a" stroke="#3a3a3a"/>
-  <text x="647" y="361" text-anchor="middle" fill="#bbb" font-size="10">CPU</text>
-  <text x="368" y="390" fill="#888" font-size="12">scales with the CPUs</text>
+  <line x1="534" y1="357" x2="542" y2="357" stroke="#888" marker-end="url(#ar2)"/>
+  <rect x="544" y="344" width="62" height="26" rx="4" fill="#1a1a1a" stroke="var(--accent)"/>
+  <text x="575" y="361" text-anchor="middle" fill="#ddd" font-size="10">thread 3</text>
+  <line x1="606" y1="357" x2="614" y2="357" stroke="#888" marker-end="url(#ar2)"/>
+  <rect x="616" y="344" width="50" height="26" rx="4" fill="#1a1a1a" stroke="#3a3a3a"/>
+  <text x="641" y="361" text-anchor="middle" fill="#bbb" font-size="10">core</text>
+  <text x="368" y="390" fill="#888" font-size="12">scales with the queue count (≤ #CPUs)</text>
 </svg>
 <div class="figcap">Depth scales concurrency per thread; queue count scales threads across CPUs.</div>
 </div>
 
 <p>To be precise, a queue thread is not pinned 1:1 to a CPU — the scheduler is free to migrate it. The statement is about capacity: one thread can burn at most one core, so one queue caps the userspace side of one device at ~100% CPU. Give the device as many queues as there are busy submitting CPUs and the cap disappears.</p>
 
-<p>Measured on a 4-vCPU QEMU guest, backing file on tmpfs (so RAM speed, not disk, is the ceiling), fio 4k randread with <code>direct=1</code>:</p>
+<p>Measured on a 4-vCPU QEMU guest, backing on <code>brd</code> (a RAM block device — RAM speed, and it supports O_DIRECT), fio 4k randread with <code>direct=1</code>:</p>
 
 <table>
 <tr><th>configuration</th><th class="num">daemon CPU (all threads)</th><th class="num">IOPS</th></tr>
-<tr><td>1 device, <code>-q 1</code> (default)</td><td class="num">≈97% — one core, saturated</td><td class="num">49.6k</td></tr>
-<tr><td>1 device, <code>-q 4</code></td><td class="num">≈275% — four queue threads on four cores</td><td class="num"><strong>130k</strong></td></tr>
-<tr><td>2 devices, <code>-q 1</code> each</td><td class="num">≈134% — one thread per device, different cores</td><td class="num">33k + 33k</td></tr>
+<tr><td>1 device, <code>-q 1</code> (default)</td><td class="num">≈63% — a single queue thread</td><td class="num">67.5k</td></tr>
+<tr><td>1 device, <code>-q 4</code></td><td class="num">≈214% — four queue threads on four cores</td><td class="num"><strong>188k</strong></td></tr>
+<tr><td>2 devices, <code>-q 1</code> each</td><td class="num">≈121% — one thread per device, different cores</td><td class="num">53k + 53k</td></tr>
 </table>
 
-<p><code>pidstat -t</code> during the <code>-q 4</code> run shows the shape directly — four queue threads, one per core:</p>
+<p><code>pidstat -t</code> during the <code>-q 4</code> run shows the shape directly — four queue threads, one per core, and nothing else:</p>
 
 <pre><code>      TID    %usr %system   %CPU   CPU  Command
-        -   11.88  263.12  275.00    0  ublkera
-     1727    2.62   37.25   39.88    0  |__ublkera-dev-/de
-     1728    2.38   37.62   40.00    1  |__ublkera-dev-/de
-     1729    2.38   37.50   39.88    2  |__ublkera-dev-/de
-     1730    2.75   37.25   40.00    3  |__ublkera-dev-/de
-     1731    0.00   29.00   29.00    2  |__iou-wrk-1729
-     ...</code></pre>
+        -   15.62  198.00  213.62    3  ublkera
+     4098    4.12   49.38   53.50    0  |__ublkera-dev-/de
+     4099    4.12   49.38   53.50    1  |__ublkera-dev-/de
+     4100    3.38   50.12   53.50    2  |__ublkera-dev-/de
+     4101    3.75   49.38   53.12    3  |__ublkera-dev-/de</code></pre>
 
-<p>Those <code>iou-wrk-*</code> rows are a bonus lesson: the backing file was opened without <code>O_DIRECT</code> (tmpfs doesn't support it), and buffered io_uring operations get punted to kernel io-wq workers — which themselves spread across cores. With <code>O_DIRECT</code> on a real disk that layer mostly disappears.</p>
+<p>One practical note: the backing store must support <code>O_DIRECT</code> for the picture to stay this clean. An earlier round of the same experiment used a file on tmpfs, which can't do O_DIRECT — every buffered io_uring operation got punted to kernel io-wq workers, and <code>pidstat</code> filled up with <code>iou-wrk-*</code> threads burning CPU on their own. Switching the backing to <code>brd</code> keeps completions inline on the queue thread, and is faster too: 67.5k vs 49.6k IOPS in the single-queue case.</p>
 
 <h3>3. Cloud kernels don't ship ublk_drv</h3>
 
