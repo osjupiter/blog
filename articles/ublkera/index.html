@@ -189,6 +189,8 @@ $ sudo ublkera dump -f /data/a.img --since 1   # byte ranges written since that 
 
 <p>Notably, the granularity never touches the IO path. A 4&nbsp;KiB write into a 64&nbsp;KiB chunk is passed through as a 4&nbsp;KiB write; the 64&nbsp;KiB unit exists only in the bookkeeping. ublkera never splits or merges requests — request sizing is the kernel's business (more on that below).</p>
 
+<p>Metadata follows one rule: <strong>it is volatile, and losing it must never corrupt a backup</strong>. The era map lives in memory; with <code>--meta</code> it is saved at checkpoints and on detach, and the on-disk file carries an "attached" marker while the device is live. If the daemon dies uncleanly, the next attach sees the marker and reports the <em>whole device</em> as changed (<code>"recovered_unclean": true</code>) — the consumer's next "incremental" is automatically a full copy. A stale cursor against a fresh era history is rejected with an error rather than answered with an empty diff. For a differential-backup tool this is the right trade: the worst case after any crash is one extra full copy, and in exchange there is no journal, no crash-consistent commit protocol, and nothing synchronous anywhere near the data path.</p>
+
 <h2>Verification: three witnesses that must agree</h2>
 
 <p>A change tracker has one job: report <em>exactly</em> the blocks that changed. Testing it with "write something, check it shows up" is too weak — the interesting bugs are over- and under-reporting. So the end-to-end test collects three independent records of the same truth and demands they match bit-for-bit:</p>
@@ -373,10 +375,10 @@ diff diff-hash.txt diff-era.txt \
 <tr><td>attach / detach at runtime</td><td>possible, manual dmsetup surgery</td><td>built in (<code>add</code>/<code>del</code>, one daemon, N devices)</td></tr>
 <tr><td>reading the dirty map</td><td>snapshot metadata + <code>era_dump</code> → XML</td><td><code>dump --since N</code> → JSON byte ranges</td></tr>
 <tr><td>data path</td><td>in-kernel remap (near zero overhead)</td><td>io_uring round trip through userspace</td></tr>
-<tr><td>crash safety of the map</td><td>metadata commits managed by kernel</td><td>saved at checkpoint/detach; crash loses the open era → take a full backup after a crash</td></tr>
+<tr><td>crash safety of the map</td><td>metadata commits managed by kernel</td><td>volatile by design: an unclean shutdown makes the next attach report everything changed — the next diff is automatically a full copy</td></tr>
 </table>
 
-<p>The honest trade: dm-era keeps the data path in the kernel and its metadata is crash-consistent; ublkera pays a userspace round trip per IO and treats an unclean shutdown as "re-baseline." In exchange you get one daemon managing N devices, runtime attach of plain files, JSON instead of XML, and change-tracking logic you can read, test, and extend like any normal program — the whole verification section above is just shell scripts against a unix socket.</p>
+<p>The honest trade: dm-era keeps the data path in the kernel and its metadata is crash-consistent; ublkera pays a userspace round trip per IO and treats its metadata as expendable — after an unclean shutdown the next diff is simply a full copy. In exchange you get one daemon managing N devices, runtime attach of plain files, JSON instead of XML, and change-tracking logic you can read, test, and extend like any normal program — the whole verification section above is just shell scripts against a unix socket.</p>
 
 <h2>Conclusion</h2>
 
