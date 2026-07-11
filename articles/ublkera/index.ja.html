@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ublkera: ublk で作るユーザ空間版 dm-era 風チェンジトラッキング</title>
+<meta name="description" content="カーネルの dirty block トラッカーを ublk 上のマルチデバイス・ユーザ空間デーモンとして作り直す — 3つの独立した証拠による検証、キュー/CPU スケーリング実験、そしてログアウト後にだけ発火するバグ。">
+<link rel="canonical" href="https://osjupiter.github.io/blog/articles/ublkera/index.ja.html">
+<link rel="alternate" hreflang="en" href="https://osjupiter.github.io/blog/articles/ublkera/">
+<link rel="alternate" hreflang="ja" href="https://osjupiter.github.io/blog/articles/ublkera/index.ja.html">
+<link rel="alternate" hreflang="x-default" href="https://osjupiter.github.io/blog/articles/ublkera/">
+<meta property="og:site_name" content="osjupiter">
+<meta property="og:title" content="ublkera: ublk で作るユーザ空間版 dm-era 風チェンジトラッキング">
+<meta property="og:description" content="カーネルの dirty block トラッカーを ublk 上のマルチデバイス・ユーザ空間デーモンとして作り直す — 検証、キュー/CPU スケーリング実験、得られた教訓。">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://osjupiter.github.io/blog/articles/ublkera/index.ja.html">
+<meta name="twitter:card" content="summary">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "ublkera: ublk で作るユーザ空間版 dm-era 風チェンジトラッキング",
+  "description": "カーネルの dirty block トラッカーを ublk 上のマルチデバイス・ユーザ空間デーモンとして作り直す — 検証、キュー/CPU スケーリング実験、得られた教訓。",
+  "url": "https://osjupiter.github.io/blog/articles/ublkera/index.ja.html",
+  "inLanguage": "ja",
+  "datePublished": "2026-07-12",
+  "dateModified": "2026-07-12",
+  "author": {"@type": "Person", "name": "osjupiter", "url": "https://github.com/osjupiter"}
+}
+</script>
+<style>
+:root {
+  --bg: #0c0c0c;
+  --bg2: #151515;
+  --bg3: #1a1a1a;
+  --fg: #d4d4d4;
+  --fg2: #888;
+  --accent: #0af;
+  --orange: #f80;
+  --red: #f44;
+  --green: #0f6;
+  --purple: #c6f;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; line-height: 1.7; }
+.container { max-width: 860px; margin: 0 auto; padding: 40px 24px; }
+h1 { font-size: 2em; line-height: 1.3; margin-bottom: 8px; color: #fff; }
+.subtitle { color: var(--fg2); font-size: 1.05em; margin-bottom: 40px; }
+h2 { font-size: 1.4em; margin: 48px 0 16px; color: #eee; border-bottom: 1px solid #222; padding-bottom: 8px; }
+h3 { font-size: 1.15em; margin: 32px 0 12px; color: #ccc; }
+p { margin-bottom: 16px; color: var(--fg); }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { background: var(--bg3); padding: 2px 6px; border-radius: 3px; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.9em; color: #ddd; }
+pre { background: var(--bg2); padding: 16px; border-radius: 6px; overflow-x: auto; margin: 16px 0; border: 1px solid #222; }
+pre code { background: none; padding: 0; font-size: 0.85em; }
+.callout { background: var(--bg2); border-left: 3px solid var(--accent); padding: 16px 20px; margin: 20px 0; border-radius: 0 6px 6px 0; }
+.callout.warn { border-left-color: var(--orange); }
+.callout.danger { border-left-color: var(--red); }
+.callout.ok { border-left-color: var(--green); }
+.callout strong { color: #eee; }
+table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.9em; }
+th, td { padding: 8px 12px; border: 1px solid #222; text-align: left; }
+th { background: var(--bg2); color: #ccc; font-weight: 600; }
+td { color: var(--fg); }
+.num { text-align: right; font-family: 'JetBrains Mono', monospace; }
+footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: var(--fg2); font-size: 0.85em; text-align: center; }
+.lang-switch { display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 0.8em; color: #555; margin-bottom: 16px; }
+.lang-switch strong { color: #ccc; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="container">
+<div class="lang-switch"><a href="../../">← 記事一覧</a><span><a href="./">EN</a> · <strong>日本語</strong></span></div>
+
+<h1>ublkera: ublk で作るユーザ空間版 dm-era 風チェンジトラッキング</h1>
+<p class="subtitle">カーネルの dirty block トラッカーをマルチデバイス対応のユーザ空間デーモンとして作り直す — 3つの独立した証拠による検証、キュー/CPU スケーリング実験、そしてログアウト後にだけ発火するバグ。</p>
+
+<h2>なぜ作ったか</h2>
+
+<p><a href="../era-differential-backup/index.ja.html">以前の記事</a>では <code>dm-era</code> — どのブロックがどの「era」に書かれたかを追跡する device-mapper ターゲット — を使って、無停止の差分バックアップをやりました。ちゃんと動きますし、今でも気に入っています。ただ、しばらく使っていると使い勝手への不満が溜まってきました:</p>
+
+<ul style="margin: 0 0 16px 24px;">
+<li>トラッキング対象1つごとに <code>dmsetup</code> のスタックを手で組む必要がある: origin、別建ての metadata LV、セクタ数入りのテーブル行。</li>
+<li>dirty map を読むには metadata ボリュームをスナップショットして <code>era_dump</code> を実行し、出てきた XML をパースしなければならない。</li>
+<li>ただのディスクイメージファイル(LV ではないもの)にトラッキングを付けるには、まず loop デバイスで包む必要がある。</li>
+</ul>
+
+<p>一方でカーネルには <a href="https://docs.kernel.org/block/ublk.html">ublk</a>(Linux 6.0+)が入りました。ブロックデバイスのデータパス全体を io_uring 経由でユーザ空間プロセスに委ねるドライバです。プロセスが <code>/dev/ublk-control</code> を開いてデバイスを作ると、以降 <code>/dev/ublkbN</code> に来る READ/WRITE/FLUSH/DISCARD はすべて自分のイベントループに届き、好きなように完了させられます。</p>
+
+<p>ここで気づきます: データパスがどのみちユーザ空間を通るなら、dirty block の追跡はただの「ついでの帳簿付け」です。そこで <strong>ublkera</strong> を作りました — バッキングファイルやブロックデバイスを ublk デバイスとして公開し、IO を 1:1 でパススルーしながら、どのチャンクがどの era に書かれたかを dm-era 方式で記録する常駐デーモンです。Rust 製で、<code>libublk</code> クレートの上に載っています。</p>
+
+<pre><code>ublkera daemon (常駐、制御ソケット /run/ublkera/daemon.sock)
+ ├─ デバイス0: supervisor thread ── /dev/ublkb0 ⇄ a.img   (eraマップ + メタデータ)
+ ├─ デバイス1: supervisor thread ── /dev/ublkb1 ⇄ b.img   (eraマップ + メタデータ)
+ └─ ... 実行中に add / del</code></pre>
+
+<p>置き換わったワークフローは気持ちよく退屈です。実行中に任意のファイル/ブロックデバイスを attach すると <code>/dev/ublkbN</code> が生え、すべて unix ソケット上の1行 JSON で会話できます:</p>
+
+<pre><code>$ sudo ublkera add -f /data/a.img --meta /var/lib/ublkera/a.meta
+{"ok":true,"dev_id":0,"bdev":"/dev/ublkb0","granularity":65536,"current_era":1}
+
+$ sudo ublkera checkpoint -n 0          # era 1 を閉じる。以降の書き込みは era 2
+$ sudo ublkera dump -n 0 --since 1      # その checkpoint 以降に書かれたバイトレンジ
+{"ok":true,"ranges":[{"offset":33554432,"len":65536}],"dirty_bytes":65536}</code></pre>
+
+<p><code>ranges</code> をデバイス(またはそのスナップショット)から読めば差分バックアップになります。運用モデルは dm-era と同じで、控えるのは整数1個。XML も metadata LV も dmsetup テーブルもありません。</p>
+
+<h2>トラッキングの仕組み</h2>
+
+<p>各デバイスはメモリ上に「このチャンクが最後に書かれた era」を表す 32bit 値の配列を1本持ちます(チャンク = granularity、既定 64&nbsp;KiB)。IO パスは厳密な 1:1 パススルーで、ublk リクエスト1個に対しバッキングファイルへの io_uring 操作1発が対応します:</p>
+
+<table>
+<tr><th>ublk op</th><th>バッキング側の操作</th><th>era マップ</th></tr>
+<tr><td><code>READ</code></td><td>同じ offset/len で io_uring read</td><td>—</td></tr>
+<tr><td><code>WRITE</code></td><td>同じ offset/len で io_uring write</td><td>完了時に刻印</td></tr>
+<tr><td><code>FLUSH</code></td><td><code>fsync</code></td><td>—</td></tr>
+<tr><td><code>DISCARD</code></td><td><code>fallocate(PUNCH_HOLE)</code></td><td>刻印(内容が変わるので!)</td></tr>
+<tr><td><code>WRITE_ZEROES</code></td><td>未対応 → <code>-EINVAL</code></td><td>—</td></tr>
+</table>
+
+<p>正しさのために効いている点が2つあります:</p>
+
+<p><strong>刻印は完了時に、<code>fetch_max</code> で行う。</strong> era 番号がチャンクのスロットに書かれるのはバッキングへの書き込みが完了した後で、しかもアトミックな max 演算です。checkpoint と実行中の書き込みが競合しても、その書き込みは<em>より新しい</em> era に帰属することしかできません。つまり失敗モードは「1 era 分遅れて dirty と報告され、余分にコピーされる」であって、「書き込みを取りこぼす」ことはない。dm-era と同じ安全側への倒し方です。</p>
+
+<p><strong>トラッキング上、DISCARD は書き込みである。</strong> hole punch はデバイスの読み出し内容を変えるので、era マップを dirty にしなければなりません。忘れやすく、忘れるとバックアップツールとしては静かなデータロスバグになります。</p>
+
+<p>注目してほしいのは、granularity が IO パスに一切触れないことです。64&nbsp;KiB チャンクへの 4&nbsp;KiB 書き込みは 4&nbsp;KiB のままパススルーされ、64&nbsp;KiB という単位は帳簿の中にしか存在しません。ublkera はリクエストを分割も結合もしません — リクエストサイズはカーネルの領分です(後述)。</p>
+
+<h2>検証: 一致すべき3つの証拠</h2>
+
+<p>チェンジトラッカーの仕事はただ1つ、変わったブロックを<em>過不足なく</em>報告することです。「書いてみて、出てくるか見る」程度のテストでは弱すぎます — 面白いバグは過剰報告と過少報告だからです。そこで E2E テストでは、同じ真実についての独立した記録を3つ集め、ビット単位での一致を要求します:</p>
+
+<ol style="margin: 0 0 16px 24px;">
+<li>空のバッキングファイルを作り、ublk で公開し、デバイス全体をランダムデータで埋める。</li>
+<li><strong>証拠 #1 — フルリードのハッシュ。</strong> デバイスを端から端まで読み、64&nbsp;KiB チャンクごとに SHA-256 を取って <code>hash.before</code> に保存。</li>
+<li>checkpoint(era 1 が閉じ、以降の書き込みは era 2 に入る)。</li>
+<li>ランダムに 20 チャンクを選び、各チャンクの<em>内部の</em>ランダムな位置に 4&nbsp;KiB の新しいランダムデータを書く。<strong>証拠 #2 — 書き込みログ</strong>: 選んだチャンクの一覧そのもの。</li>
+<li>再度 checkpoint(差分を凍結)し、全体を再ハッシュして <code>hash.after</code> に。<code>before ≠ after</code> のチャンクが「実際に変わったもの」の正解データ。</li>
+<li><strong>証拠 #3 — トラッカー。</strong> <code>dump --since 1</code> のバイトレンジをチャンク番号に展開する。</li>
+</ol>
+
+<pre><code>paste hash.before hash.after | awk '$2 != $4 {print $1}' &gt; diff-hash.txt
+ublkera dump -n 0 --since 1 | (レンジをチャンク番号に展開) &gt; diff-era.txt
+
+diff diff-hash.txt diff-era.txt \
+  &amp;&amp; diff written-chunks.txt diff-era.txt \
+  &amp;&amp; echo "MATCH: hash diff == era diff == written chunks"</code></pre>
+
+<p>3つは一致しました: 書いたのは 20 チャンク、ハッシュが変わったのも 20 チャンク、トラッカーが報告したのも同じ 20 チャンク。部分書き込みのケースも自動的にカバーされます — チャンクの真ん中への 4&nbsp;KiB 書き込みはその<em>チャンク全体</em>を dirty にしなければならず、実際そうなりました。</p>
+
+<div class="callout warn">
+<strong>単純に見えるこのテストに潜む3つの罠。</strong>
+(1) ハッシュのブロック長はトラッキングの granularity と一致させること。トラッカーはチャンク単位でしか答えられないので、ずれると比較自体が無意味になります。
+(2) era 差分は形式的にはハッシュ差分の<em>上位集合</em>です: 同一データの上書きはマップを dirty にしますがハッシュは変えません。<code>/dev/urandom</code> を書けば同一ハッシュの上書きはまず起こらず、⊇ が = になります。
+(3) <code>O_DIRECT</code> の書き込みとバッファードの読み出しを混ぜると、古いページキャッシュを読んで幻の差分が出ます — 各ハッシュパスの前にキャッシュを落とす(か direct read を使う)こと。
+</div>
+
+<h2>ublk についてわかったこと</h2>
+
+<h3>1. 最大リクエストサイズの正体は「事前確保バッファ」</h3>
+
+<p>ublk サーバは in-flight リクエスト1個(タグ1個)につきバッファを1本事前確保し、そのサイズをデバイス作成時にカーネルへ申告します。カーネルはそれをデバイスの <code>max_hw_sectors_kb</code> として広告し、それより大きいリクエストは送ってきません。慣習的なデフォルト(ublksrv も ublkera も)は 512&nbsp;KiB なので、4&nbsp;MiB のシーケンシャルライトは 512&nbsp;KiB × 8 リクエストとして届き、それぞれがバッキングへの write 1発としてパススルーされます。</p>
+
+<p>では 512&nbsp;KiB はプロトコルの上限なのか? 違います — 自分で選ぶメモリとスループットのトレードオフです。デバイスあたりの常駐メモリは <code>queues × depth × buf_size</code>(既定 1 × 64 × 512&nbsp;KiB = 32&nbsp;MiB)。カーネルが実際に何を受け付けるかを実測しました(ゲストカーネル 6.8):</p>
+
+<table>
+<tr><th>申告したバッファサイズ</th><th class="num">max_sectors_kb(実効)</th><th class="num">max_hw_sectors_kb(上限)</th></tr>
+<tr><td>512K</td><td class="num">512</td><td class="num">512</td></tr>
+<tr><td>1M</td><td class="num">1024</td><td class="num">1024</td></tr>
+<tr><td>2M</td><td class="num"><strong>1280</strong></td><td class="num">2048</td></tr>
+<tr><td>4M</td><td class="num"><strong>1280</strong></td><td class="num">4096</td></tr>
+<tr><td>16M</td><td class="num"><strong>1280</strong></td><td class="num">16384</td></tr>
+</table>
+
+<p>驚きは真ん中の列です: 約 1.25&nbsp;MiB を超えると<em>別の</em>制限に当たります — ブロック層のソフト上限 <code>max_sectors_kb</code> で、これは ublk に限らず全ブロックデバイスで既定 1280&nbsp;KiB です。HW 上限はバッファに合わせて伸び続けますが、実効リクエストサイズは sysfs でソフト上限も上げない限り(<code>echo N &gt; /sys/block/ublkbN/queue/max_sectors_kb</code>)伸びません。ノブは2つ、持ち主も2人。</p>
+
+<h3>2. 「1デバイス ≈ 1コア」はデフォルトであって限界ではない</h3>
+
+<p>ublkera のスレッド構成は ublk の自然な形に従っています: デバイス1個につき supervisor スレッド1本、その下に <strong>HW キュー1本につき専用の IO スレッド + io_uring</strong>。デバイス間で共有する実行資源はなく、era の刻印も完了ごとのアトミック演算1回だけなので、複数デバイスは何の調整もなしに複数コアへ散ります。</p>
+
+<p>ただし1デバイスの中では、既定はキュー1本 — データパスのユーザ空間側が1スレッドに直列化され、ホットなデバイスはおよそ1コアを張り付かせます。最初は「ublk の限界か」と思いましたが、違いました: ublk デバイスは <code>nr_hw_queues</code> パラメータ付きで作成でき、blk-mq が発行元 CPU をキューに割り当て、キューごとにサーバスレッドが立ちます。手を伸ばせば届くデフォルトです(ublkera では <code>add -q 4</code>)。</p>
+
+<p>4 vCPU の QEMU ゲスト、バッキングは tmpfs(律速がディスクでなく RAM になるように)、fio 4k randread <code>direct=1</code> での実測:</p>
+
+<table>
+<tr><th>構成</th><th class="num">デーモン CPU(全スレッド)</th><th class="num">IOPS</th></tr>
+<tr><td>1デバイス、<code>-q 1</code>(既定)</td><td class="num">≈97% — 1コアが飽和</td><td class="num">49.6k</td></tr>
+<tr><td>1デバイス、<code>-q 4</code></td><td class="num">≈275% — キュースレッド4本が4コアに</td><td class="num"><strong>130k</strong></td></tr>
+<tr><td>2デバイス、各 <code>-q 1</code></td><td class="num">≈134% — デバイスごとに1本、別コアに</td><td class="num">33k + 33k</td></tr>
+</table>
+
+<p><code>-q 4</code> 実行中の <code>pidstat -t</code> がその形をそのまま見せてくれます — キュースレッド4本、1コアに1本ずつ:</p>
+
+<pre><code>      TID    %usr %system   %CPU   CPU  Command
+        -   11.88  263.12  275.00    0  ublkera
+     1727    2.62   37.25   39.88    0  |__ublkera-dev-/de
+     1728    2.38   37.62   40.00    1  |__ublkera-dev-/de
+     1729    2.38   37.50   39.88    2  |__ublkera-dev-/de
+     1730    2.75   37.25   40.00    3  |__ublkera-dev-/de
+     1731    0.00   29.00   29.00    2  |__iou-wrk-1729
+     ...</code></pre>
+
+<p><code>iou-wrk-*</code> の行はおまけの教訓です: バッキングファイルを <code>O_DIRECT</code> なしで開いていたため(tmpfs は O_DIRECT 非対応)、バッファードの io_uring 操作はカーネルの io-wq ワーカーに punt され、それ自身も複数コアに散ります。実ディスク + <code>O_DIRECT</code> ならこの層はほぼ消えます。</p>
+
+<h3>3. cloud イメージのカーネルに ublk_drv は入っていない</h3>
+
+<p>小さいけれど時間を食った話: Ubuntu の cloud イメージには <code>ublk_drv.ko</code> が入っていません — <code>linux-modules-extra</code> に入っていて、cloud 向けカーネルフレーバーはそれを引き込まないのです。cloud イメージから作ったテスト VM では、<code>apt install linux-modules-extra-$(uname -r)</code> するまで <code>modprobe ublk_drv</code> が失敗します。cloud-init に焼き込んで忘れましょう。</p>
+
+<p>プロジェクトには最終的に QEMU ベースのテスト環境が2つでき、どちらもホスト root 不要です: CI 的なチェック用の <strong>busybox initramfs VM</strong>(ホストカーネル + デーモンバイナリ + <code>ublk_drv.ko</code> だけで数秒で起動し E2E 一式を実行)と、対話的にいじるための <strong>Ubuntu cloud イメージのフル VM</strong>(上記のモジュール対策込みで cloud-init がプロビジョニング)。実ブロックデバイスはどこかで root が要ります — VM ならその「どこか」を使い捨てにできます。</p>
+
+<h2>ログアウト後にだけ発火するバグ</h2>
+
+<p>1つだけ、独立した節に値するバグがありました。メカニズムが古典だからです。症状: デーモンは正常に動き、テストスイートも全部通る……のに<em>翌日</em>、すべての <code>add</code> がこう失敗します:</p>
+
+<pre><code>{"error": "device for '/root/cbt-test.img' did not come up within 15s"}</code></pre>
+
+<p>デバイスノードは現れず、dmesg にも何もなし。そして本当に混乱させられたのは、同じマシンで新しく起動したデーモンなら即座に成功することでした。壊れているのは長時間動いているデーモンだけ。<code>add</code> 実行中のデーモンを <code>strace</code> すると、動かぬ証拠が2行:</p>
+
+<pre><code>write(1, "\n", 1)                                = -1 EIO
+write(2, "\nthread 'ublkera-dev-/root/cbt-t"..., 203) = -1 EIO</code></pre>
+
+<p>デバイス自体は正常に作成できていました。その直後、「device ready」フックが libublk のヘルパーを呼び、それがデバイス情報を stdout に <code>println!</code> します。デーモンは stdio を<em>引き継いだまま</em>デーモン化していて、それは起動元 ssh セッションの pty を指したままでした。セッションが終わると pty は死に、次の write が <code>EIO</code> を返し、そして Rust では失敗した <code>println!</code> は <strong>panic</strong> します。panic は readiness を報告する前に supervisor スレッドを巻き戻し、作られたばかりのデバイスも道連れにしました。かくして「日中はずっと動くのに、ログアウトすると壊れる」が完成します。</p>
+
+<p>修正は3つ、それぞれ単独でも価値があるものです:</p>
+
+<ul style="margin: 0 0 16px 24px;">
+<li>デーモン化時に stdio を <code>/dev/null</code> に切り離す — 親の端末を握ったままのバックグラウンドデーモンは、ログアウトをトリガーにした時限爆弾です。</li>
+<li>デーモン側のコードパスでは stdout に一切出力しない。応答は制御ソケットへ、診断はログへ。</li>
+<li>「起動スレッドが死んだ」(ready チャネルの切断 — panic を即座に報告)と「起動が遅い」(15秒タイムアウト)を区別する。誤解を招くタイムアウトメッセージがデバッグ時間の大半を奪いました。</li>
+</ul>
+
+<div class="callout danger">
+<strong>一般化できる教訓:</strong> 端末の fd を引き継いだ長寿命プロセスは、その端末が閉じる瞬間に予約された潜在障害を抱えています。しかも print の失敗が致命的な言語(Rust の <code>println!</code>、Python の <code>BrokenPipeError</code>)では、離れた場所で、無関係に見えるスタックトレースとともに、派手に死にます。
+</div>
+
+<h2>dm-era vs ublkera</h2>
+
+<table>
+<tr><th></th><th>dm-era</th><th>ublkera</th></tr>
+<tr><td>トラッキングの場所</td><td>カーネル(device-mapper ターゲット)</td><td>ユーザ空間デーモン(ublk)</td></tr>
+<tr><td>デバイスごとのセットアップ</td><td>metadata LV + <code>dmsetup</code> テーブル</td><td><code>add</code> コマンド1発、任意のファイル/デバイス</td></tr>
+<tr><td>実行中の attach / detach</td><td>可能だが手動の dmsetup 手術</td><td>組み込み(<code>add</code>/<code>del</code>、1デーモンで N デバイス)</td></tr>
+<tr><td>dirty map の読み出し</td><td>metadata をスナップショット + <code>era_dump</code> → XML</td><td><code>dump --since N</code> → JSON のバイトレンジ</td></tr>
+<tr><td>データパス</td><td>カーネル内リマップ(ほぼゼロオーバーヘッド)</td><td>ユーザ空間経由の io_uring 往復</td></tr>
+<tr><td>マップのクラッシュ耐性</td><td>カーネルが metadata コミットを管理</td><td>checkpoint/detach 時に保存。クラッシュで開いていた era は失われる → クラッシュ後はフルバックアップを取り直す</td></tr>
+</table>
+
+<p>正直なトレードオフはこうです: dm-era はデータパスがカーネル内に留まり、メタデータはクラッシュ整合。ublkera は IO ごとにユーザ空間往復のコストを払い、不意の停止は「ベースラインの取り直し」として扱います。その代わりに得られるのは、1デーモンで N デバイスの管理、ただのファイルへの実行時 attach、XML の代わりの JSON、そして普通のプログラムと同じように読めて・テストできて・拡張できるチェンジトラッキングのロジックです — 上の検証の節は、全部 unix ソケットに向けたシェルスクリプトでできています。</p>
+
+<h2>まとめ</h2>
+
+<p>ublk は「カーネルがこれを追跡してくれたらいいのに」を「自分のプロセスなんだから自分で追跡すればいい」に変えてくれます。パススルー + 帳簿付けというパターンは本当に小さなプログラムで済み — era マップはアトミック値の配列と2つのルール(完了時に刻印、max で刻印)だけ — 本当に手間がかかったのは、いつも手間がかかるところでした: 検証の方法論、スレッドのデフォルト、そして ublk より古くからあるデーモンのライフサイクルバグです。</p>
+
+<p>性能面では、バックアップツールの規模においてユーザ空間経由はボトルネックになりません: キュースレッド1本で控えめな仮想ハードウェア上でも 4k IOPS 約5万、キューを増やせばコア数までほぼ線形に伸び、シーケンシャル IO はリクエストサイズのままパススルーされます。dm-era が苦手とするもの — ただのイメージファイル、出たり消えたりするデバイス、1つのスーパーバイザで管理したいデバイス群 — に dm-era のセマンティクスが欲しいなら、ublk の上に建てるのはかなり妥当な立地です。</p>
+
+<footer>
+  Ubuntu 24.04(ゲストカーネル 6.8、QEMU/KVM、4 vCPU)+ fio 3.36 で検証。
+  ublkera: Rust + libublk 0.4、granularity 64KiB、既定値 -q 1 -d 64 -b 512K。
+</footer>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ublkera: dm-era-style Change Tracking in Userspace with ublk</title>
+<meta name="description" content="Rebuilding the kernel's dirty-block tracker as a multi-device userspace daemon on ublk — verification by three independent witnesses, queue/CPU scaling experiments, and a daemonize bug that only fires after you log out.">
+<link rel="canonical" href="https://osjupiter.github.io/blog/articles/ublkera/">
+<link rel="alternate" hreflang="en" href="https://osjupiter.github.io/blog/articles/ublkera/">
+<link rel="alternate" hreflang="ja" href="https://osjupiter.github.io/blog/articles/ublkera/index.ja.html">
+<link rel="alternate" hreflang="x-default" href="https://osjupiter.github.io/blog/articles/ublkera/">
+<meta property="og:site_name" content="osjupiter">
+<meta property="og:title" content="ublkera: dm-era-style Change Tracking in Userspace with ublk">
+<meta property="og:description" content="Rebuilding the kernel's dirty-block tracker as a multi-device userspace daemon on ublk — verification, queue/CPU scaling experiments, and lessons learned.">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://osjupiter.github.io/blog/articles/ublkera/">
+<meta name="twitter:card" content="summary">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "ublkera: dm-era-style Change Tracking in Userspace with ublk",
+  "description": "Rebuilding the kernel's dirty-block tracker as a multi-device userspace daemon on ublk — verification, queue/CPU scaling experiments, and lessons learned.",
+  "url": "https://osjupiter.github.io/blog/articles/ublkera/",
+  "datePublished": "2026-07-12",
+  "dateModified": "2026-07-12",
+  "author": {"@type": "Person", "name": "osjupiter", "url": "https://github.com/osjupiter"}
+}
+</script>
+<style>
+:root {
+  --bg: #0c0c0c;
+  --bg2: #151515;
+  --bg3: #1a1a1a;
+  --fg: #d4d4d4;
+  --fg2: #888;
+  --accent: #0af;
+  --orange: #f80;
+  --red: #f44;
+  --green: #0f6;
+  --purple: #c6f;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; line-height: 1.7; }
+.container { max-width: 860px; margin: 0 auto; padding: 40px 24px; }
+h1 { font-size: 2em; line-height: 1.3; margin-bottom: 8px; color: #fff; }
+.subtitle { color: var(--fg2); font-size: 1.05em; margin-bottom: 40px; }
+h2 { font-size: 1.4em; margin: 48px 0 16px; color: #eee; border-bottom: 1px solid #222; padding-bottom: 8px; }
+h3 { font-size: 1.15em; margin: 32px 0 12px; color: #ccc; }
+p { margin-bottom: 16px; color: var(--fg); }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { background: var(--bg3); padding: 2px 6px; border-radius: 3px; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.9em; color: #ddd; }
+pre { background: var(--bg2); padding: 16px; border-radius: 6px; overflow-x: auto; margin: 16px 0; border: 1px solid #222; }
+pre code { background: none; padding: 0; font-size: 0.85em; }
+.callout { background: var(--bg2); border-left: 3px solid var(--accent); padding: 16px 20px; margin: 20px 0; border-radius: 0 6px 6px 0; }
+.callout.warn { border-left-color: var(--orange); }
+.callout.danger { border-left-color: var(--red); }
+.callout.ok { border-left-color: var(--green); }
+.callout strong { color: #eee; }
+table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.9em; }
+th, td { padding: 8px 12px; border: 1px solid #222; text-align: left; }
+th { background: var(--bg2); color: #ccc; font-weight: 600; }
+td { color: var(--fg); }
+.num { text-align: right; font-family: 'JetBrains Mono', monospace; }
+footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: var(--fg2); font-size: 0.85em; text-align: center; }
+.lang-switch { display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 0.8em; color: #555; margin-bottom: 16px; }
+.lang-switch strong { color: #ccc; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="container">
+<div class="lang-switch"><a href="../../">← index</a><span><strong>EN</strong> · <a href="index.ja.html">日本語</a></span></div>
+
+<h1>ublkera: dm-era-style Change Tracking in Userspace with ublk</h1>
+<p class="subtitle">Rebuilding the kernel's dirty-block tracker as a multi-device userspace daemon — verification by three independent witnesses, queue/CPU scaling experiments, and a bug that only fires after you log out.</p>
+
+<h2>Why build this?</h2>
+
+<p>In <a href="../era-differential-backup/">a previous article</a> I used <code>dm-era</code> — the kernel's device-mapper target that tracks which blocks were written in which "era" — to do zero-downtime differential backups. It works, and I still like it. But living with it for a while left a list of ergonomic complaints:</p>
+
+<ul style="margin: 0 0 16px 24px;">
+<li>Every tracked device is a <code>dmsetup</code> stack you have to assemble by hand: an origin, a separate metadata LV, a table line with sector counts.</li>
+<li>Reading the dirty map means snapshotting the metadata volume and running <code>era_dump</code>, which emits XML you then have to parse.</li>
+<li>Adding tracking to a plain disk image file — not an LV, just a file — means wrapping it in a loop device first.</li>
+</ul>
+
+<p>Meanwhile the kernel grew <a href="https://docs.kernel.org/block/ublk.html">ublk</a> (Linux 6.0+): a driver that hands the entire data path of a block device to a userspace process over io_uring. Your process opens <code>/dev/ublk-control</code>, creates a device, and from then on every READ/WRITE/FLUSH/DISCARD that hits <code>/dev/ublkbN</code> is delivered to your event loop to complete however you like.</p>
+
+<p>Which raises the question: if the data path passes through userspace anyway, tracking dirty blocks is just bookkeeping on the side. So I built <strong>ublkera</strong> — a single resident daemon that exposes backing files or block devices as ublk devices, passes IO through 1:1, and records which chunks were written in which era, dm-era style. In Rust, on top of the <code>libublk</code> crate.</p>
+
+<pre><code>ublkera daemon (resident, control socket /run/ublkera/daemon.sock)
+ ├─ device 0: supervisor thread ── /dev/ublkb0 ⇄ a.img   (era map + metadata)
+ ├─ device 1: supervisor thread ── /dev/ublkb1 ⇄ b.img   (era map + metadata)
+ └─ ... add / del at runtime</code></pre>
+
+<p>The workflow it replaces is pleasantly boring. Attach any file or block device at runtime and a <code>/dev/ublkbN</code> appears; everything speaks one-line JSON over a unix socket:</p>
+
+<pre><code>$ sudo ublkera add -f /data/a.img --meta /var/lib/ublkera/a.meta
+{"ok":true,"dev_id":0,"bdev":"/dev/ublkb0","granularity":65536,"current_era":1}
+
+$ sudo ublkera checkpoint -n 0          # close era 1, writes now stamp era 2
+$ sudo ublkera dump -n 0 --since 1      # byte ranges written since that checkpoint
+{"ok":true,"ranges":[{"offset":33554432,"len":65536}],"dirty_bytes":65536}</code></pre>
+
+<p>Read the <code>ranges</code> from the device (or a snapshot of it), and you have your differential backup — same operational model as dm-era, one integer of bookkeeping, no XML, no metadata LV, no dmsetup tables.</p>
+
+<h2>How the tracking works</h2>
+
+<p>Each device keeps an in-memory array: one 32-bit "era this chunk was last written in" per chunk (chunk = granularity, default 64&nbsp;KiB). The IO path is a strict 1:1 passthrough — one ublk request in, one io_uring operation on the backing file out:</p>
+
+<table>
+<tr><th>ublk op</th><th>backing operation</th><th>era map</th></tr>
+<tr><td><code>READ</code></td><td>io_uring read at same offset/len</td><td>—</td></tr>
+<tr><td><code>WRITE</code></td><td>io_uring write at same offset/len</td><td>stamp on completion</td></tr>
+<tr><td><code>FLUSH</code></td><td><code>fsync</code></td><td>—</td></tr>
+<tr><td><code>DISCARD</code></td><td><code>fallocate(PUNCH_HOLE)</code></td><td>stamp (contents changed!)</td></tr>
+<tr><td><code>WRITE_ZEROES</code></td><td>not supported → <code>-EINVAL</code></td><td>—</td></tr>
+</table>
+
+<p>Two details matter for correctness:</p>
+
+<p><strong>Stamping happens at completion, with <code>fetch_max</code>.</strong> The era number is written into the chunk slot only after the backing write finishes, using an atomic max. If a checkpoint races with an in-flight write, the write can only be attributed to the <em>newer</em> era — the failure mode is "a chunk is reported dirty one era too late, so it gets copied redundantly," never "a write is missed." The same safe-direction bias dm-era has.</p>
+
+<p><strong>DISCARD is a write, as far as tracking is concerned.</strong> A hole punch changes what the device reads back, so it must dirty the era map. Easy to forget, and a silent data-loss bug in a backup tool if you do.</p>
+
+<p>Notably, the granularity never touches the IO path. A 4&nbsp;KiB write into a 64&nbsp;KiB chunk is passed through as a 4&nbsp;KiB write; the 64&nbsp;KiB unit exists only in the bookkeeping. ublkera never splits or merges requests — request sizing is the kernel's business (more on that below).</p>
+
+<h2>Verification: three witnesses that must agree</h2>
+
+<p>A change tracker has one job: report <em>exactly</em> the blocks that changed. Testing it with "write something, check it shows up" is too weak — the interesting bugs are over- and under-reporting. So the end-to-end test collects three independent records of the same truth and demands they match bit-for-bit:</p>
+
+<ol style="margin: 0 0 16px 24px;">
+<li>Create an empty backing file, expose it via ublk, fill the whole device with random data.</li>
+<li><strong>Witness #1 — full-read hashes.</strong> Read the device end to end, SHA-256 per 64&nbsp;KiB chunk, save as <code>hash.before</code>.</li>
+<li>Checkpoint (era 1 closes; writes now land in era 2).</li>
+<li>Pick 20 random chunks; write 4&nbsp;KiB of fresh random data at a random offset <em>inside</em> each. <strong>Witness #2 — the write log</strong>: the exact chunk list we chose.</li>
+<li>Checkpoint again (freezes the diff), re-hash everything as <code>hash.after</code>. Chunks where <code>before ≠ after</code> are the ground truth of what changed.</li>
+<li><strong>Witness #3 — the tracker.</strong> <code>dump --since 1</code>, expand the byte ranges to chunk numbers.</li>
+</ol>
+
+<pre><code>paste hash.before hash.after | awk '$2 != $4 {print $1}' &gt; diff-hash.txt
+ublkera dump -n 0 --since 1 | (expand ranges to chunk numbers) &gt; diff-era.txt
+
+diff diff-hash.txt diff-era.txt \
+  &amp;&amp; diff written-chunks.txt diff-era.txt \
+  &amp;&amp; echo "MATCH: hash diff == era diff == written chunks"</code></pre>
+
+<p>All three agree: 20 chunks written, 20 chunks changed by hash, 20 chunks reported by the tracker, same numbers. The partial-write case is covered for free — a 4&nbsp;KiB write in the middle of a chunk must flip that <em>whole</em> chunk to dirty, and does.</p>
+
+<div class="callout warn">
+<strong>Three traps in this seemingly simple test.</strong>
+(1) The hash block size must equal the tracking granularity, or the comparison is meaningless — the tracker can only ever answer in chunk units.
+(2) The era diff is formally a <em>superset</em> of the hash diff: rewriting identical data dirties the map but not the hash. Writing <code>/dev/urandom</code> makes a same-hash overwrite vanishingly unlikely, turning ⊇ into =.
+(3) Mixing <code>O_DIRECT</code> writes with buffered reads serves you stale page cache and phantom differences — drop caches (or use direct reads) before each hash pass.
+</div>
+
+<h2>What I learned about ublk</h2>
+
+<h3>1. The max request size is really a preallocated buffer</h3>
+
+<p>A ublk server preallocates one buffer per in-flight request (per tag), and declares that size to the kernel at device creation. The kernel then advertises it as the device's <code>max_hw_sectors_kb</code> and never sends a larger request. The conventional default — ublksrv's and ublkera's — is 512&nbsp;KiB, so a 4&nbsp;MiB sequential write arrives as 8 × 512&nbsp;KiB requests, each passed through as one backing write.</p>
+
+<p>Is 512&nbsp;KiB a protocol limit? No — it's a memory/throughput trade-off you own. Resident memory per device is <code>queues × depth × buf_size</code> (default 1 × 64 × 512&nbsp;KiB = 32&nbsp;MiB). I measured what the kernel actually accepts (6.8 guest):</p>
+
+<table>
+<tr><th>declared buf size</th><th class="num">max_sectors_kb (effective)</th><th class="num">max_hw_sectors_kb (ceiling)</th></tr>
+<tr><td>512K</td><td class="num">512</td><td class="num">512</td></tr>
+<tr><td>1M</td><td class="num">1024</td><td class="num">1024</td></tr>
+<tr><td>2M</td><td class="num"><strong>1280</strong></td><td class="num">2048</td></tr>
+<tr><td>4M</td><td class="num"><strong>1280</strong></td><td class="num">4096</td></tr>
+<tr><td>16M</td><td class="num"><strong>1280</strong></td><td class="num">16384</td></tr>
+</table>
+
+<p>The surprise in the middle column: past ~1.25&nbsp;MiB you hit a <em>different</em> limit — the block layer's soft cap <code>max_sectors_kb</code>, which defaults to 1280&nbsp;KiB for every block device, ublk or not. The hardware ceiling keeps growing with your buffer; the effective request size doesn't, unless you also raise the soft cap via sysfs (<code>echo N &gt; /sys/block/ublkbN/queue/max_sectors_kb</code>). Two knobs, two owners.</p>
+
+<h3>2. "One device ≈ one core" is a default, not a limit</h3>
+
+<p>ublkera's threading follows ublk's natural shape: one supervisor thread per device, and under it <strong>one dedicated IO thread + io_uring per hardware queue</strong>. Devices share no execution resources, and era stamping is a single atomic per completion, so multiple devices spread across cores with no coordination at all.</p>
+
+<p>Within one device, though, the default is one queue — so the userspace half of the data path serializes on one thread, and a hot device pegs roughly one core. My first instinct was "ublk limitation." It isn't: ublk devices are created with an <code>nr_hw_queues</code> parameter, blk-mq maps submitting CPUs onto queues, and each queue gets its own server thread. It's just a default you have to reach for (<code>add -q 4</code> in ublkera).</p>
+
+<p>Measured on a 4-vCPU QEMU guest, backing file on tmpfs (so RAM speed, not disk, is the ceiling), fio 4k randread with <code>direct=1</code>:</p>
+
+<table>
+<tr><th>configuration</th><th class="num">daemon CPU (all threads)</th><th class="num">IOPS</th></tr>
+<tr><td>1 device, <code>-q 1</code> (default)</td><td class="num">≈97% — one core, saturated</td><td class="num">49.6k</td></tr>
+<tr><td>1 device, <code>-q 4</code></td><td class="num">≈275% — four queue threads on four cores</td><td class="num"><strong>130k</strong></td></tr>
+<tr><td>2 devices, <code>-q 1</code> each</td><td class="num">≈134% — one thread per device, different cores</td><td class="num">33k + 33k</td></tr>
+</table>
+
+<p><code>pidstat -t</code> during the <code>-q 4</code> run shows the shape directly — four queue threads, one per core:</p>
+
+<pre><code>      TID    %usr %system   %CPU   CPU  Command
+        -   11.88  263.12  275.00    0  ublkera
+     1727    2.62   37.25   39.88    0  |__ublkera-dev-/de
+     1728    2.38   37.62   40.00    1  |__ublkera-dev-/de
+     1729    2.38   37.50   39.88    2  |__ublkera-dev-/de
+     1730    2.75   37.25   40.00    3  |__ublkera-dev-/de
+     1731    0.00   29.00   29.00    2  |__iou-wrk-1729
+     ...</code></pre>
+
+<p>Those <code>iou-wrk-*</code> rows are a bonus lesson: the backing file was opened without <code>O_DIRECT</code> (tmpfs doesn't support it), and buffered io_uring operations get punted to kernel io-wq workers — which themselves spread across cores. With <code>O_DIRECT</code> on a real disk that layer mostly disappears.</p>
+
+<h3>3. Cloud kernels don't ship ublk_drv</h3>
+
+<p>Small but time-consuming: Ubuntu cloud images don't include <code>ublk_drv.ko</code> — it lives in <code>linux-modules-extra</code>, which the cloud kernel flavor doesn't pull in. If your test VM is built from a cloud image, <code>modprobe ublk_drv</code> fails until you <code>apt install linux-modules-extra-$(uname -r)</code>. Bake it into cloud-init and forget about it.</p>
+
+<p>The project ended up with two QEMU-based test rigs, both rootless on the host: a <strong>busybox initramfs VM</strong> (host kernel + the daemon binary + <code>ublk_drv.ko</code>, boots and runs the full E2E suite in seconds) for CI-style checks, and a <strong>full Ubuntu cloud-image VM</strong> for interactive poking, provisioned by cloud-init with the module fix above. Real block devices need root somewhere; a VM keeps "somewhere" disposable.</p>
+
+<h2>The bug that only fires after you log out</h2>
+
+<p>One bug deserves its own section, because the mechanism is a classic. Symptom: the daemon runs fine, passes the full test suite… and the <em>next day</em>, every <code>add</code> fails with:</p>
+
+<pre><code>{"error": "device for '/root/cbt-test.img' did not come up within 15s"}</code></pre>
+
+<p>No device node, nothing in dmesg, and — the genuinely confusing part — a freshly started daemon on the same machine worked instantly. Only the long-running daemon was broken. <code>strace</code> on the daemon during an <code>add</code> found the smoking gun in two lines:</p>
+
+<pre><code>write(1, "\n", 1)                                = -1 EIO
+write(2, "\nthread 'ublkera-dev-/root/cbt-t"..., 203) = -1 EIO</code></pre>
+
+<p>The device had actually come up fine. Then the "device ready" hook called a libublk helper that <code>println!</code>s a device summary to stdout. The daemon had daemonized with <em>inherited</em> stdio — still pointing at the pty of the ssh session that started it. When that session ended, the pty died; the next write to it returned <code>EIO</code>; and in Rust, a failed <code>println!</code> <strong>panics</strong>. The panic unwound the supervisor thread before it could report readiness, taking the freshly created device with it. Hence: works all day, breaks after you log out.</p>
+
+<p>Three fixes, each independently worth having:</p>
+
+<ul style="margin: 0 0 16px 24px;">
+<li>Daemonize with stdio detached to <code>/dev/null</code> — a background daemon holding its parent's terminal is a time bomb with a logout-shaped trigger.</li>
+<li>No stdout printing anywhere in daemon-side code paths. Responses belong on the control socket; diagnostics belong in the log.</li>
+<li>Distinguish "startup thread died" (ready-channel disconnected — report the panic immediately) from "startup is slow" (15s timeout). The misleading timeout message cost most of the debugging time.</li>
+</ul>
+
+<div class="callout danger">
+<strong>The general lesson:</strong> any long-lived process that inherits a terminal fd has a latent failure scheduled for the moment that terminal closes — and in languages where a failed print is fatal (Rust's <code>println!</code>, Python's <code>BrokenPipeError</code>), it fails loudly, at a distance, with a stack trace pointing somewhere innocent.
+</div>
+
+<h2>dm-era vs ublkera</h2>
+
+<table>
+<tr><th></th><th>dm-era</th><th>ublkera</th></tr>
+<tr><td>where tracking runs</td><td>kernel (device-mapper target)</td><td>userspace daemon (ublk)</td></tr>
+<tr><td>setup per device</td><td>metadata LV + <code>dmsetup</code> table</td><td>one <code>add</code> command, any file/device</td></tr>
+<tr><td>attach / detach at runtime</td><td>possible, manual dmsetup surgery</td><td>built in (<code>add</code>/<code>del</code>, one daemon, N devices)</td></tr>
+<tr><td>reading the dirty map</td><td>snapshot metadata + <code>era_dump</code> → XML</td><td><code>dump --since N</code> → JSON byte ranges</td></tr>
+<tr><td>data path</td><td>in-kernel remap (near zero overhead)</td><td>io_uring round trip through userspace</td></tr>
+<tr><td>crash safety of the map</td><td>metadata commits managed by kernel</td><td>saved at checkpoint/detach; crash loses the open era → take a full backup after a crash</td></tr>
+</table>
+
+<p>The honest trade: dm-era keeps the data path in the kernel and its metadata is crash-consistent; ublkera pays a userspace round trip per IO and treats an unclean shutdown as "re-baseline." In exchange you get one daemon managing N devices, runtime attach of plain files, JSON instead of XML, and change-tracking logic you can read, test, and extend like any normal program — the whole verification section above is just shell scripts against a unix socket.</p>
+
+<h2>Conclusion</h2>
+
+<p>ublk turns "I wish the kernel tracked this for me" into "I'll track it myself, it's my process anyway." The passthrough-plus-bookkeeping pattern is a genuinely small program — the era map is an array of atomics and two rules (stamp on completion, stamp with max) — and the parts that took real effort were exactly the parts that always do: verification methodology, threading defaults, and a daemon lifecycle bug older than ublk itself.</p>
+
+<p>Performance-wise, the userspace hop is not the bottleneck at backup-tool scale: one queue thread moves ~50k 4k IOPS on modest virtual hardware, queues scale it linearly across cores, and sequential IO passes through at full request size. If you need dm-era semantics on things dm-era is awkward about — plain image files, devices that come and go, fleets managed by one supervisor — building on ublk is a very reasonable place to stand.</p>
+
+<footer>
+  Tested on Ubuntu 24.04 (guest kernel 6.8, QEMU/KVM, 4 vCPU) with fio 3.36.
+  ublkera: Rust + libublk 0.4, granularity 64KiB, defaults -q 1 -d 64 -b 512K.
+</footer>
+
+</div>
+</body>
+</html>
