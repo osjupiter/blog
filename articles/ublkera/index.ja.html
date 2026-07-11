@@ -351,22 +351,22 @@ diff diff-hash.txt diff-era.txt \
 
 <p>正確に言えば、キュースレッドが CPU に 1:1 で固定されるわけではありません — スケジューラは自由にスレッドを移動できます。これはキャパシティの話です: 1本のスレッドが燃やせるのは最大1コアなので、キュー1本は1デバイスのユーザ空間側を CPU 約100% で頭打ちにします。忙しい発行元 CPU の数だけキューを与えれば、この頭打ちは消えます。</p>
 
-<p>4 vCPU の QEMU ゲスト、virtio ディスクをバッキングに fio 4k randread(4ジョブ、<code>direct=1</code>)での実測:</p>
+<p>4 vCPU の QEMU ゲスト、virtio ディスクをバッキングに fio 4k randwrite(4ジョブ、<code>direct=1</code>)での実測:</p>
 
 <table>
 <tr><th>構成</th><th class="num">デーモン CPU(全スレッド)</th><th class="num">IOPS</th></tr>
-<tr><td>1デバイス、<code>-q 1</code>(既定)</td><td class="num">≈66% — キュースレッド1本</td><td class="num">37.7k</td></tr>
-<tr><td>1デバイス、<code>-q 4</code></td><td class="num">≈134% — キュースレッド4本が4コアに</td><td class="num">42.5k</td></tr>
+<tr><td>1デバイス、<code>-q 1</code>(既定)</td><td class="num">≈60% — キュースレッド1本</td><td class="num">30.1k</td></tr>
+<tr><td>1デバイス、<code>-q 4</code></td><td class="num">≈124% — キュースレッド4本が4コアに</td><td class="num">34.3k</td></tr>
 </table>
 
 <p><code>-q 4</code> 実行中の <code>pidstat -t</code> がその形をそのまま見せてくれます — キュースレッド4本、1コアに1本ずつ、それ以外は何もいません:</p>
 
 <pre><code>      TID    %usr %system   %CPU   CPU  Command
-        -    7.50  126.25  133.75    1  ublkera
-     4031    2.12   31.62   33.75    0  |__ublkb0-q0
-     4032    1.62   32.00   33.62    1  |__ublkb0-q1
-     4033    2.00   31.13   33.12    2  |__ublkb0-q2
-     4034    1.88   31.37   33.25    3  |__ublkb0-q3</code></pre>
+        -    7.37  116.73  124.09    1  ublkera
+     4565    1.87   28.84   30.71    0  |__ublkb0-q0
+     4566    1.75   29.59   31.34    1  |__ublkb0-q1
+     4567    1.75   29.34   31.09    2  |__ublkb0-q2
+     4568    1.87   28.96   30.84    3  |__ublkb0-q3</code></pre>
 
 <p>2行の間で IOPS がほとんど動かないのは、律速が CPU ではなくバッキング側にあるからです。キューが増やすのは使える CPU で、それがスループットに化けるのは CPU が足りないときだけです。</p>
 
@@ -396,15 +396,17 @@ diff diff-hash.txt diff-era.txt \
 
 <p>ここではホストのキャッシュが ×16 増幅をまだ吸収していますが、実ハードウェアではタダではありません — リクエストあたりの固定コスト、キューの占有、シーケンシャル性がすべて 64&nbsp;KiB の断片で悪化します。設計上の帰結: dm-era ではトラッキング粒度を細かくすると IO の形が直接悪くなる。ublkera では粒度とリクエストサイズが独立したノブです。</p>
 
-<p>次に、ブロックサイズを 4&nbsp;KiB に固定した素のスループット — 固定するのは IOPS を比較可能にするためです(IOPS × ブロックサイズ = 帯域。4&nbsp;KiB はどちら側でも分割されず、デバイス側カウンタで増幅ゼロを確認済み):</p>
+<p>次に、4ワークロードでの素のスループット(fio 4ジョブ、<code>direct=1</code>。行ごとにブロックサイズを固定して比較可能に — 4&nbsp;KiB はどちら側でも分割されません):</p>
 
 <table>
-<tr><th>4k randread、4 ジョブ</th><th class="num">IOPS</th></tr>
-<tr><td>dm-era</td><td class="num"><strong>76.1k</strong></td></tr>
-<tr><td>ublkera</td><td class="num">37.3k</td></tr>
+<tr><th>ワークロード</th><th class="num">dm-era</th><th class="num">ublkera</th></tr>
+<tr><td>4k randread</td><td class="num">76.0k IOPS</td><td class="num">37.9k IOPS</td></tr>
+<tr><td>4k randwrite</td><td class="num">51.3k IOPS</td><td class="num">29.9k IOPS</td></tr>
+<tr><td>1M seq read</td><td class="num">14.2 GiB/s</td><td class="num">5.2 GiB/s</td></tr>
+<tr><td>1M seq write</td><td class="num">5.2 GiB/s</td><td class="num">3.8 GiB/s</td></tr>
 </table>
 
-<p>差は約2倍です: バッキング IO そのものに加えて、ublk のリクエストはすべて uring_cmd の往復とタグごとのバッファを経由するメモリコピーを払うためです。</p>
+<p>差はワークロードによって ×1.4〜×2.8 です: バッキング IO に加えて、ublk のリクエストはすべて uring_cmd の往復とタグごとのバッファを経由するメモリコピーを払うためで、4&nbsp;KiB では往復が、1&nbsp;MiB ではコピーが効きます。</p>
 
 <p>トレードオフは一言で言えます: <strong>dm-era のほうが速い。ublkera はその性能と引き換えに、チェンジトラッキングをユーザ空間の普通のプログラムとして持てる</strong> — 読めて、テストできて、好きに拡張できる。この記事の検証手順も揮発性メタデータの設計も、全部その「拡張しやすさ」の側の産物です。</p>
 
@@ -412,7 +414,7 @@ diff diff-hash.txt diff-era.txt \
 
 <p>ublk は「カーネルがこれを追跡してくれたらいいのに」を「自分のプロセスなんだから自分で追跡すればいい」に変えてくれます。パススルー + 帳簿付けというパターンは本当に小さなプログラムで済み — era マップはアトミック値の配列と2つのルール(完了時に刻印、max で刻印)だけ — 本当に手間がかかったのは、いつも手間がかかるところでした: 検証の方法論とスレッドのデフォルトです。</p>
 
-<p>性能面では、バックアップツールの規模においてユーザ空間経由はボトルネックになりません: 同じディスク上でキュースレッド1本でもカーネル内の dm-era の約2分の1以内に収まり、シーケンシャル IO はリクエストサイズのままパススルーされます。dm-era が苦手とする形 — 出たり消えたりするデバイス、1つのスーパーバイザで管理したいデバイス群 — に dm-era のセマンティクスが欲しいなら、ublk の上に建てるのはかなり妥当な立地です。</p>
+<p>性能面では、バックアップツールの規模においてユーザ空間経由はボトルネックになりません: 同じディスク上で、ランダムでもシーケンシャルでも、キュースレッド1本でカーネル内 dm-era の ×1.4〜×2.8 以内に収まります。dm-era が苦手とする形 — 出たり消えたりするデバイス、1つのスーパーバイザで管理したいデバイス群 — に dm-era のセマンティクスが欲しいなら、ublk の上に建てるのはかなり妥当な立地です。</p>
 
 <footer>
   Ubuntu 24.04(ゲストカーネル 6.8、QEMU/KVM、4 vCPU)+ fio 3.36 で検証。
