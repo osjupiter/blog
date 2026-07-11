@@ -141,14 +141,15 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 
 <h2>Why build ublkera?</h2>
 
-<p>In <a href="../era-differential-backup/">a previous article</a> I used <code>dm-era</code> — the kernel's device-mapper target that tracks which blocks were written in which "era" — to do zero-downtime differential backups. It works, and I still like it. But living with it for a while left a list of ergonomic complaints:</p>
+<p>In <a href="../era-differential-backup/">a previous article</a> I verified that zero-downtime differential backup works with <code>dm-era</code> — the device-mapper target that tracks which blocks were written in which "era". The mechanism is sound. But I never felt comfortable taking it to production, and picturing the day-to-day operations surfaced concrete pain points:</p>
 
 <ul style="margin: 0 0 16px 24px;">
-<li>Every tracked device is a <code>dmsetup</code> stack assembled by hand — an origin, a separate metadata LV, a table line with sector counts. Track ten devices and you have ten stacks, with nothing managing them as a group.</li>
-<li>Reading the dirty map is not one query: snapshot the metadata LV, run <code>era_dump</code> against the snapshot, parse the XML. (Running a dump tool is table stakes for any tracker — the friction is the snapshot choreography around it, and the output format.)</li>
+<li>The metadata device. dm-era demands a dedicated, persistent metadata device and has no "don't persist" option. For differential backup the metadata is allowed to die — worst case you take a fresh full copy — but getting that behavior means hacks like backing the metadata LV with tmpfs or brd, and you still own the failure mode of a corrupted metadata device at assemble time.</li>
+<li>Every tracked device is a <code>dmsetup</code> stack assembled by hand — an origin, a metadata LV, a table line with sector counts. Track ten devices and you have ten stacks, with nothing managing them as a group.</li>
+<li>Reading the dirty map is not one query: snapshot the metadata LV, run <code>era_dump</code> against the snapshot, parse the XML.</li>
 </ul>
 
-<p>What I actually wanted was an operational shape dm-era doesn't have: <strong>one resident process supervising change tracking for any number of block devices</strong> — attach and detach at runtime, one control socket, answers in JSON.</p>
+<p>What I actually wanted was an operational shape dm-era doesn't have: <strong>one resident process supervising change tracking for any number of block devices</strong> — attach and detach at runtime, one control socket, answers in JSON. And metadata treated as something that is allowed to simply vanish.</p>
 
 <p>Look back at the ublk request loop above and the fix suggests itself: every write already passes through my process, so tracking dirty blocks is just bookkeeping on the side. ublkera is that idea as a single resident daemon — it exposes backing files or block devices as ublk devices, passes IO through 1:1, and records which chunks were written in which era, dm-era style. In Rust, on top of the <code>libublk</code> crate.</p>
 
