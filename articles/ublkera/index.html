@@ -350,23 +350,24 @@ diff diff-hash.txt diff-era.txt \
 
 <p>To be precise, a queue thread is not pinned 1:1 to a CPU — the scheduler is free to migrate it. The statement is about capacity: one thread can burn at most one core, so one queue caps the userspace side of one device at ~100% CPU. Give the device as many queues as there are busy submitting CPUs and the cap disappears.</p>
 
-<p>Measured on a 4-vCPU QEMU guest, backing on <code>brd</code> (a RAM block device — RAM speed, and it supports O_DIRECT), fio 4k randread, 4 jobs, <code>direct=1</code>:</p>
+<p>Measured on a 4-vCPU QEMU guest, fio 4k randread (4 jobs, <code>direct=1</code>) against a virtio disk:</p>
 
 <table>
 <tr><th>configuration</th><th class="num">daemon CPU (all threads)</th><th class="num">IOPS</th></tr>
-<tr><td>1 device, <code>-q 1</code> (default)</td><td class="num">≈77% — a single queue thread</td><td class="num">91.5k</td></tr>
-<tr><td>1 device, <code>-q 4</code></td><td class="num">≈213% — four queue threads on four cores</td><td class="num"><strong>185k</strong></td></tr>
-<tr><td>2 devices, <code>-q 1</code> each</td><td class="num">≈121% — one thread per device, different cores</td><td class="num">52k + 52k</td></tr>
+<tr><td>1 device, <code>-q 1</code> (default)</td><td class="num">≈66% — a single queue thread</td><td class="num">37.7k</td></tr>
+<tr><td>1 device, <code>-q 4</code></td><td class="num">≈134% — four queue threads on four cores</td><td class="num">42.5k</td></tr>
 </table>
 
 <p><code>pidstat -t</code> during the <code>-q 4</code> run shows the shape directly — four queue threads, one per core, and nothing else:</p>
 
 <pre><code>      TID    %usr %system   %CPU   CPU  Command
-        -   16.25  196.50  212.75    1  ublkera
-     3476    4.38   49.00   53.37    0  |__ublkb0-q0
-     3477    4.00   49.00   53.00    1  |__ublkb0-q1
-     3478    3.75   49.50   53.25    2  |__ublkb0-q2
-     3479    3.88   49.25   53.12    3  |__ublkb0-q3</code></pre>
+        -    7.50  126.25  133.75    1  ublkera
+     4031    2.12   31.62   33.75    0  |__ublkb0-q0
+     4032    1.62   32.00   33.62    1  |__ublkb0-q1
+     4033    2.00   31.13   33.12    2  |__ublkb0-q2
+     4034    1.88   31.37   33.25    3  |__ublkb0-q3</code></pre>
+
+<p>The IOPS barely move between the two rows because this backing — not the CPU — is the bottleneck. Queues add usable CPU; that turns into throughput only when CPU is what you are short of.</p>
 
 <h2>dm-era vs ublkera</h2>
 
@@ -382,7 +383,7 @@ diff diff-hash.txt diff-era.txt \
 
 <h3>Measured: request shape, and raw throughput</h3>
 
-<p>The data-path row of that table can be measured rather than asserted — from two angles. Conditions: both trackers sit on the same virtio disk (dm-era’s metadata lives on a small RAM disk, off the data path), tracking granularity and era block size both 64&nbsp;KiB, the same fio jobs against the same first 1&nbsp;GiB.</p>
+<p>The data-path row of that table can be measured rather than asserted — from two angles. Conditions: both trackers sit on the same virtio disk (dm-era’s metadata lives on a separate small device, off the data path), tracking granularity and era block size both 64&nbsp;KiB, the same fio jobs against the same first 1&nbsp;GiB.</p>
 
 <p>First, request shape under a 1&nbsp;MiB sequential write stream. dm-era splits every bio at era-block boundaries — that is how its writeset marking works — so the tracking granularity dictates the IO unit. ublkera's granularity exists only in the bookkeeping:</p>
 
@@ -394,16 +395,15 @@ diff diff-hash.txt diff-era.txt \
 
 <p>Here the host’s cache still absorbs the ×16 amplification; on real hardware it is not free — per-request fixed costs, queue occupancy, and sequential behavior all degrade with 64&nbsp;KiB fragments. The design consequence: in dm-era, choosing finer tracking granularity directly worsens the IO shape; in ublkera, granularity and request size are independent knobs.</p>
 
-<p>Second, raw throughput at a fixed 4&nbsp;KiB block size — fixed so the IOPS are actually comparable (IOPS × block size = bandwidth, and 4&nbsp;KiB never splits on either side; device-side counters confirm zero amplification). Two backings, because the backing decides how much the userspace hop shows:</p>
+<p>Second, raw throughput at a fixed 4&nbsp;KiB block size — fixed so the IOPS are actually comparable (IOPS × block size = bandwidth, and 4&nbsp;KiB never splits on either side; device-side counters confirm zero amplification):</p>
 
 <table>
-<tr><th>4k randread, 4 jobs</th><th class="num">RAM disk backing</th><th class="num">virtio disk backing</th></tr>
-<tr><td>dm-era</td><td class="num"><strong>983k</strong></td><td class="num"><strong>76.1k</strong></td></tr>
-<tr><td>ublkera <code>-q 1</code></td><td class="num">90.5k</td><td class="num">37.3k</td></tr>
-<tr><td>ublkera <code>-q 4</code></td><td class="num">184k</td><td class="num">42.4k</td></tr>
+<tr><th>4k randread, 4 jobs</th><th class="num">IOPS</th></tr>
+<tr><td>dm-era</td><td class="num"><strong>76.1k</strong></td></tr>
+<tr><td>ublkera</td><td class="num">37.3k</td></tr>
 </table>
 
-<p>On a RAM disk nothing exists but per-request overhead, and the in-kernel path wins by 5×+ — that is the plain ublk limit: every request pays a uring_cmd round trip <em>and a memory copy through the per-tag buffer</em>. Against an actual disk, backing latency dominates instead: the gap compresses to about ×2, and extra queues stop helping (<code>-q 4</code> buys almost nothing when the bottleneck sits below you).</p>
+<p>The gap is about ×2: on top of the backing IO itself, every ublk request pays a uring_cmd round trip and a memory copy through the per-tag buffer.</p>
 
 <p>The trade fits in one line: <strong>dm-era is faster; ublkera trades that performance for change tracking that lives in userspace as an ordinary program</strong> — readable, testable, and easy to extend. This article's verification procedure and the volatile-metadata design are both products of that side of the trade.</p>
 
@@ -411,7 +411,7 @@ diff diff-hash.txt diff-era.txt \
 
 <p>ublk turns "I wish the kernel tracked this for me" into "I'll track it myself, it's my process anyway." The passthrough-plus-bookkeeping pattern is a genuinely small program — the era map is an array of atomics and two rules (stamp on completion, stamp with max) — and the parts that took real effort were exactly the parts that always do: verification methodology and threading defaults.</p>
 
-<p>Performance-wise, the userspace hop is not the bottleneck at backup-tool scale: one queue thread moves ~90k 4k IOPS on modest virtual hardware, queues scale it linearly across cores, and sequential IO passes through at full request size. If you need dm-era semantics in shapes dm-era is awkward about — devices that come and go, a fleet of them managed by one supervisor — building on ublk is a very reasonable place to stand.</p>
+<p>Performance-wise, the userspace hop is not the bottleneck at backup-tool scale: against the same disk a single queue thread stayed within about ×2 of in-kernel dm-era, and sequential IO passes through at full request size. If you need dm-era semantics in shapes dm-era is awkward about — devices that come and go, a fleet of them managed by one supervisor — building on ublk is a very reasonable place to stand.</p>
 
 <footer>
   Tested on Ubuntu 24.04 (guest kernel 6.8, QEMU/KVM, 4 vCPU) with fio 3.36.

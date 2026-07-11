@@ -351,23 +351,24 @@ diff diff-hash.txt diff-era.txt \
 
 <p>正確に言えば、キュースレッドが CPU に 1:1 で固定されるわけではありません — スケジューラは自由にスレッドを移動できます。これはキャパシティの話です: 1本のスレッドが燃やせるのは最大1コアなので、キュー1本は1デバイスのユーザ空間側を CPU 約100% で頭打ちにします。忙しい発行元 CPU の数だけキューを与えれば、この頭打ちは消えます。</p>
 
-<p>4 vCPU の QEMU ゲスト、バッキングは <code>brd</code>(RAM ディスク — RAM 速度で、O_DIRECT も使える)、fio 4k randread(4ジョブ、<code>direct=1</code>)での実測:</p>
+<p>4 vCPU の QEMU ゲスト、virtio ディスクをバッキングに fio 4k randread(4ジョブ、<code>direct=1</code>)での実測:</p>
 
 <table>
 <tr><th>構成</th><th class="num">デーモン CPU(全スレッド)</th><th class="num">IOPS</th></tr>
-<tr><td>1デバイス、<code>-q 1</code>(既定)</td><td class="num">≈77% — キュースレッド1本</td><td class="num">91.5k</td></tr>
-<tr><td>1デバイス、<code>-q 4</code></td><td class="num">≈213% — キュースレッド4本が4コアに</td><td class="num"><strong>185k</strong></td></tr>
-<tr><td>2デバイス、各 <code>-q 1</code></td><td class="num">≈121% — デバイスごとに1本、別コアに</td><td class="num">52k + 52k</td></tr>
+<tr><td>1デバイス、<code>-q 1</code>(既定)</td><td class="num">≈66% — キュースレッド1本</td><td class="num">37.7k</td></tr>
+<tr><td>1デバイス、<code>-q 4</code></td><td class="num">≈134% — キュースレッド4本が4コアに</td><td class="num">42.5k</td></tr>
 </table>
 
 <p><code>-q 4</code> 実行中の <code>pidstat -t</code> がその形をそのまま見せてくれます — キュースレッド4本、1コアに1本ずつ、それ以外は何もいません:</p>
 
 <pre><code>      TID    %usr %system   %CPU   CPU  Command
-        -   16.25  196.50  212.75    1  ublkera
-     3476    4.38   49.00   53.37    0  |__ublkb0-q0
-     3477    4.00   49.00   53.00    1  |__ublkb0-q1
-     3478    3.75   49.50   53.25    2  |__ublkb0-q2
-     3479    3.88   49.25   53.12    3  |__ublkb0-q3</code></pre>
+        -    7.50  126.25  133.75    1  ublkera
+     4031    2.12   31.62   33.75    0  |__ublkb0-q0
+     4032    1.62   32.00   33.62    1  |__ublkb0-q1
+     4033    2.00   31.13   33.12    2  |__ublkb0-q2
+     4034    1.88   31.37   33.25    3  |__ublkb0-q3</code></pre>
+
+<p>2行の間で IOPS がほとんど動かないのは、律速が CPU ではなくバッキング側にあるからです。キューが増やすのは使える CPU で、それがスループットに化けるのは CPU が足りないときだけです。</p>
 
 <h2>dm-era vs ublkera</h2>
 
@@ -383,7 +384,7 @@ diff diff-hash.txt diff-era.txt \
 
 <h3>実測: リクエストの形と、素のスループット</h3>
 
-<p>この表の「データパス」行は、主張ではなく測定にできます — 2つの角度から。条件: どちらも同じ virtio ディスクを origin に(dm-era の metadata は小さな RAM ディスクに置き、データパス外)、トラッキング granularity と era ブロックサイズはどちらも 64&nbsp;KiB、同じ fio ジョブを同じ先頭 1&nbsp;GiB に。</p>
+<p>この表の「データパス」行は、主張ではなく測定にできます — 2つの角度から。条件: どちらも同じ virtio ディスクを origin に(dm-era の metadata は別の小さなデバイスに置き、データパス外)、トラッキング granularity と era ブロックサイズはどちらも 64&nbsp;KiB、同じ fio ジョブを同じ先頭 1&nbsp;GiB に。</p>
 
 <p>まず、1&nbsp;MiB シーケンシャルライトを流したときのリクエストの形。dm-era はすべての bio を era ブロック境界で分割します — writeset への記録がそういう仕組みなので — 、つまりトラッキング粒度が IO の単位を支配します。ublkera の granularity は帳簿の中にしか存在しません:</p>
 
@@ -395,16 +396,15 @@ diff diff-hash.txt diff-era.txt \
 
 <p>ここではホストのキャッシュが ×16 増幅をまだ吸収していますが、実ハードウェアではタダではありません — リクエストあたりの固定コスト、キューの占有、シーケンシャル性がすべて 64&nbsp;KiB の断片で悪化します。設計上の帰結: dm-era ではトラッキング粒度を細かくすると IO の形が直接悪くなる。ublkera では粒度とリクエストサイズが独立したノブです。</p>
 
-<p>次に、ブロックサイズを 4&nbsp;KiB に固定した素のスループット — 固定するのは IOPS を比較可能にするためです(IOPS × ブロックサイズ = 帯域。4&nbsp;KiB はどちら側でも分割されず、デバイス側カウンタで増幅ゼロを確認済み)。バッキングを2種類併記します — ユーザ空間 hop がどれだけ見えるかは、バッキングが決めるからです:</p>
+<p>次に、ブロックサイズを 4&nbsp;KiB に固定した素のスループット — 固定するのは IOPS を比較可能にするためです(IOPS × ブロックサイズ = 帯域。4&nbsp;KiB はどちら側でも分割されず、デバイス側カウンタで増幅ゼロを確認済み):</p>
 
 <table>
-<tr><th>4k randread、4 ジョブ</th><th class="num">RAM ディスク backing</th><th class="num">virtio ディスク backing</th></tr>
-<tr><td>dm-era</td><td class="num"><strong>983k</strong></td><td class="num"><strong>76.1k</strong></td></tr>
-<tr><td>ublkera <code>-q 1</code></td><td class="num">90.5k</td><td class="num">37.3k</td></tr>
-<tr><td>ublkera <code>-q 4</code></td><td class="num">184k</td><td class="num">42.4k</td></tr>
+<tr><th>4k randread、4 ジョブ</th><th class="num">IOPS</th></tr>
+<tr><td>dm-era</td><td class="num"><strong>76.1k</strong></td></tr>
+<tr><td>ublkera</td><td class="num">37.3k</td></tr>
 </table>
 
-<p>RAM ディスクではリクエストあたりのオーバーヘッド以外に何も存在しないので、カーネル内パスが 5 倍以上勝ちます — これが ublk の限界の素の姿です: すべてのリクエストが uring_cmd の往復と<em>タグごとのバッファを経由するメモリコピー</em>を払う。実ディスク相手ではバッキングのレイテンシが支配的になり、差は約2倍まで縮み、キューを増やしても効かなくなります(ボトルネックが自分より下にあるとき、<code>-q 4</code> はほぼ何も買いません)。</p>
+<p>差は約2倍です: バッキング IO そのものに加えて、ublk のリクエストはすべて uring_cmd の往復とタグごとのバッファを経由するメモリコピーを払うためです。</p>
 
 <p>トレードオフは一言で言えます: <strong>dm-era のほうが速い。ublkera はその性能と引き換えに、チェンジトラッキングをユーザ空間の普通のプログラムとして持てる</strong> — 読めて、テストできて、好きに拡張できる。この記事の検証手順も揮発性メタデータの設計も、全部その「拡張しやすさ」の側の産物です。</p>
 
@@ -412,7 +412,7 @@ diff diff-hash.txt diff-era.txt \
 
 <p>ublk は「カーネルがこれを追跡してくれたらいいのに」を「自分のプロセスなんだから自分で追跡すればいい」に変えてくれます。パススルー + 帳簿付けというパターンは本当に小さなプログラムで済み — era マップはアトミック値の配列と2つのルール(完了時に刻印、max で刻印)だけ — 本当に手間がかかったのは、いつも手間がかかるところでした: 検証の方法論とスレッドのデフォルトです。</p>
 
-<p>性能面では、バックアップツールの規模においてユーザ空間経由はボトルネックになりません: キュースレッド1本で控えめな仮想ハードウェア上でも 4k IOPS 約9万、キューを増やせばコア数までほぼ線形に伸び、シーケンシャル IO はリクエストサイズのままパススルーされます。dm-era が苦手とする形 — 出たり消えたりするデバイス、1つのスーパーバイザで管理したいデバイス群 — に dm-era のセマンティクスが欲しいなら、ublk の上に建てるのはかなり妥当な立地です。</p>
+<p>性能面では、バックアップツールの規模においてユーザ空間経由はボトルネックになりません: 同じディスク上でキュースレッド1本でもカーネル内の dm-era の約2分の1以内に収まり、シーケンシャル IO はリクエストサイズのままパススルーされます。dm-era が苦手とする形 — 出たり消えたりするデバイス、1つのスーパーバイザで管理したいデバイス群 — に dm-era のセマンティクスが欲しいなら、ublk の上に建てるのはかなり妥当な立地です。</p>
 
 <footer>
   Ubuntu 24.04(ゲストカーネル 6.8、QEMU/KVM、4 vCPU)+ fio 3.36 で検証。
