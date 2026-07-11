@@ -388,6 +388,31 @@ diff diff-hash.txt diff-era.txt \
 <tr><td>マップのクラッシュ耐性</td><td>カーネルが metadata コミットを管理</td><td>設計として揮発性: 不意の停止後は次の attach が全域を変更扱いにする — 次の差分が自動的にフルコピーになる</td></tr>
 </table>
 
+<h3>実測: リクエストの形と、素のスループット</h3>
+
+<p>上の表のうち2行は、主張ではなく測定にできます。条件は両者で同じ: 同じ RAM ディスクをバッキングに、トラッキング granularity と era ブロックサイズはどちらも 64&nbsp;KiB、同じ fio ジョブ。</p>
+
+<p>まず、1&nbsp;MiB シーケンシャルライトを流したときのリクエストの形。dm-era はすべての bio を era ブロック境界で分割します — writeset への記録がそういう仕組みなので — 、つまりトラッキング粒度が IO の単位を支配します。ublkera の granularity は帳簿の中にしか存在しません:</p>
+
+<table>
+<tr><th>1&nbsp;MiB seq write</th><th class="num">fio 発行</th><th class="num">デバイスに届くリクエスト</th></tr>
+<tr><td>dm-era(era ブロック 64&nbsp;KiB)</td><td class="num">5,421 IOPS</td><td class="num"><strong>88,422 w/s @ 64&nbsp;KiB — ×16</strong></td></tr>
+<tr><td>ublkera(granularity 64&nbsp;KiB、<code>-b 512K</code>)</td><td class="num">3,205 IOPS</td><td class="num">6,375 w/s @ 512&nbsp;KiB — ×2</td></tr>
+</table>
+
+<p>RAM ディスクならこの ×16 増幅はタダですが、実ハードウェアではそうはいきません — リクエストあたりの固定コスト、キューの占有、シーケンシャル性がすべて 64&nbsp;KiB の断片で悪化します。設計上の帰結: dm-era ではトラッキング粒度を細かくすると IO の形が直接悪くなる。ublkera では粒度とリクエストサイズが独立したノブです。</p>
+
+<p>次に、ブロックサイズを 4&nbsp;KiB に固定した素のスループット — 固定するのは IOPS を比較可能にするためです(IOPS × ブロックサイズ = 帯域。4&nbsp;KiB はどちら側でも分割されず、デバイス側カウンタで増幅ゼロを確認済み):</p>
+
+<table>
+<tr><th>4k randread、4 ジョブ</th><th class="num">IOPS</th></tr>
+<tr><td>dm-era</td><td class="num"><strong>983k</strong></td></tr>
+<tr><td>ublkera <code>-q 1</code></td><td class="num">90.5k</td></tr>
+<tr><td>ublkera <code>-q 4</code></td><td class="num">184k</td></tr>
+</table>
+
+<p>勝負にならず、これは ublk の限界としてはっきり書いておく価値があります: カーネル内の remap は発行側の全 CPU を境界越えなしで継承するのに対し、ublkera はリクエストごとに uring_cmd の往復と<em>タグごとのバッファを経由するメモリコピー</em>を払います。最大の伸びしろはこのコピーで、最近のカーネルには ublk のゼロコピーモード(バッファを経由せず、リクエストのページをサーバの io_uring に直接登録する)が入っており、この差のかなりの部分を取り返せるはずです — ublkera はまだ使っていません。実バッキングディスクの数万 IOPS の世界ではどちらの天井も見えてきませんが、天井がどこにあるかを示す数字です。</p>
+
 <p>正直なトレードオフはこうです: dm-era はデータパスがカーネル内に留まり、メタデータはクラッシュ整合。ublkera は IO ごとにユーザ空間往復のコストを払い、メタデータを使い捨てとして扱います — 不意の停止の後は、次の差分が自動的にフルコピーになるだけ。その代わりに得られるのは、1デーモンで N デバイスの管理、ただのファイルへの実行時 attach、XML の代わりの JSON、そして普通のプログラムと同じように読めて・テストできて・拡張できるチェンジトラッキングのロジックです — 上の検証の節は、全部 unix ソケットに向けたシェルスクリプトでできています。</p>
 
 <h2>まとめ</h2>

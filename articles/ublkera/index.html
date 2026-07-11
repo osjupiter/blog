@@ -387,6 +387,31 @@ diff diff-hash.txt diff-era.txt \
 <tr><td>crash safety of the map</td><td>metadata commits managed by kernel</td><td>volatile by design: an unclean shutdown makes the next attach report everything changed — the next diff is automatically a full copy</td></tr>
 </table>
 
+<h3>Measured: request shape, and raw throughput</h3>
+
+<p>Two of those rows can be measured rather than asserted. Same conditions on both sides: the same RAM-disk backing, tracking granularity and era block size both 64&nbsp;KiB, the same fio jobs.</p>
+
+<p>First, request shape under a 1&nbsp;MiB sequential write stream. dm-era splits every bio at era-block boundaries — that is how its writeset marking works — so the tracking granularity dictates the IO unit. ublkera's granularity exists only in the bookkeeping:</p>
+
+<table>
+<tr><th>1&nbsp;MiB seq write</th><th class="num">fio issues</th><th class="num">requests reaching the device</th></tr>
+<tr><td>dm-era (era block 64&nbsp;KiB)</td><td class="num">5,421 IOPS</td><td class="num"><strong>88,422 w/s @ 64&nbsp;KiB — ×16</strong></td></tr>
+<tr><td>ublkera (gran 64&nbsp;KiB, <code>-b 512K</code>)</td><td class="num">3,205 IOPS</td><td class="num">6,375 w/s @ 512&nbsp;KiB — ×2</td></tr>
+</table>
+
+<p>On a RAM disk that ×16 amplification is free; on real hardware it is not — per-request fixed costs, queue occupancy, and sequential behavior all degrade with 64&nbsp;KiB fragments. The design consequence: in dm-era, choosing finer tracking granularity directly worsens the IO shape; in ublkera, granularity and request size are independent knobs.</p>
+
+<p>Second, raw throughput at a fixed 4&nbsp;KiB block size — fixed so the IOPS are actually comparable (IOPS × block size = bandwidth, and 4&nbsp;KiB never splits on either side; device-side counters confirm zero amplification):</p>
+
+<table>
+<tr><th>4k randread, 4 jobs</th><th class="num">IOPS</th></tr>
+<tr><td>dm-era</td><td class="num"><strong>983k</strong></td></tr>
+<tr><td>ublkera <code>-q 1</code></td><td class="num">90.5k</td></tr>
+<tr><td>ublkera <code>-q 4</code></td><td class="num">184k</td></tr>
+</table>
+
+<p>No contest, and worth stating plainly as a ublk limit: the in-kernel remap inherits every submitting CPU with no boundary crossing, while ublkera pays a uring_cmd round trip <em>and a memory copy through the per-tag buffer</em> for every request. The copy is the biggest known lever — recent kernels add zero-copy modes for ublk (registering the request's pages directly into the server's io_uring instead of bouncing through the buffer), which should claw back a meaningful part of this gap; ublkera doesn't use them yet. In the tens-of-thousands-IOPS regime of a real backing disk neither ceiling is in play — but this is where they are.</p>
+
 <p>The honest trade: dm-era keeps the data path in the kernel and its metadata is crash-consistent; ublkera pays a userspace round trip per IO and treats its metadata as expendable — after an unclean shutdown the next diff is simply a full copy. In exchange you get one daemon managing N devices, runtime attach of plain files, JSON instead of XML, and change-tracking logic you can read, test, and extend like any normal program — the whole verification section above is just shell scripts against a unix socket.</p>
 
 <h2>Conclusion</h2>
