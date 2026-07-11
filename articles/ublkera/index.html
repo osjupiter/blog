@@ -350,22 +350,22 @@ diff diff-hash.txt diff-era.txt \
 
 <p>To be precise, a queue thread is not pinned 1:1 to a CPU — the scheduler is free to migrate it. The statement is about capacity: one thread can burn at most one core, so one queue caps the userspace side of one device at ~100% CPU. Give the device as many queues as there are busy submitting CPUs and the cap disappears.</p>
 
-<p>Measured on a 4-vCPU QEMU guest, fio 4k randwrite (4 jobs, <code>direct=1</code>) against a virtio disk:</p>
+<p>Measured on a 4-vCPU QEMU guest, fio 4k randwrite (4 jobs, <code>direct=1</code>) against a virtio disk attached with <code>cache=none</code>, so the host page cache is out of the picture:</p>
 
 <table>
 <tr><th>configuration</th><th class="num">daemon CPU (all threads)</th><th class="num">IOPS</th></tr>
-<tr><td>1 device, <code>-q 1</code> (default)</td><td class="num">≈60% — a single queue thread</td><td class="num">30.1k</td></tr>
-<tr><td>1 device, <code>-q 4</code></td><td class="num">≈124% — four queue threads on four cores</td><td class="num">34.3k</td></tr>
+<tr><td>1 device, <code>-q 1</code> (default)</td><td class="num">≈42% — a single queue thread</td><td class="num">24.3k</td></tr>
+<tr><td>1 device, <code>-q 4</code></td><td class="num">≈91% — four queue threads on four cores</td><td class="num">27.8k</td></tr>
 </table>
 
 <p><code>pidstat -t</code> during the <code>-q 4</code> run shows the shape directly — four queue threads, one per core, and nothing else:</p>
 
 <pre><code>      TID    %usr %system   %CPU   CPU  Command
-        -    7.37  116.73  124.09    1  ublkera
-     4565    1.87   28.84   30.71    0  |__ublkb0-q0
-     4566    1.75   29.59   31.34    1  |__ublkb0-q1
-     4567    1.75   29.34   31.09    2  |__ublkb0-q2
-     4568    1.87   28.96   30.84    3  |__ublkb0-q3</code></pre>
+        -    5.12   85.39   90.51    2  ublkera
+     1645    1.37   21.10   22.47    0  |__ublkb0-q0
+     1646    1.50   21.47   22.97    1  |__ublkb0-q1
+     1647    1.12   21.47   22.60    2  |__ublkb0-q2
+     1648    1.12   21.47   22.60    3  |__ublkb0-q3</code></pre>
 
 <p>The IOPS barely move between the two rows because this backing — not the CPU — is the bottleneck. Queues add usable CPU; that turns into throughput only when CPU is what you are short of.</p>
 
@@ -395,17 +395,17 @@ diff diff-hash.txt diff-era.txt \
 
 <p>Here the host’s cache still absorbs the ×16 amplification; on real hardware it is not free — per-request fixed costs, queue occupancy, and sequential behavior all degrade with 64&nbsp;KiB fragments. The design consequence: in dm-era, choosing finer tracking granularity directly worsens the IO shape; in ublkera, granularity and request size are independent knobs.</p>
 
-<p>Second, raw throughput across four workloads (4 fio jobs, <code>direct=1</code>; block size fixed per row so the numbers are comparable — 4&nbsp;KiB never splits on either side):</p>
+<p>Second, raw throughput across four workloads (4 fio jobs, <code>direct=1</code>, host page cache bypassed via <code>cache=none</code>; block size fixed per row so the numbers are comparable — 4&nbsp;KiB never splits on either side):</p>
 
 <table>
 <tr><th>workload</th><th class="num">dm-era</th><th class="num">ublkera</th></tr>
-<tr><td>4k randread</td><td class="num">76.0k IOPS</td><td class="num">37.9k IOPS</td></tr>
-<tr><td>4k randwrite</td><td class="num">51.3k IOPS</td><td class="num">29.9k IOPS</td></tr>
-<tr><td>1M seq read</td><td class="num">14.2 GiB/s</td><td class="num">5.2 GiB/s</td></tr>
-<tr><td>1M seq write</td><td class="num">5.2 GiB/s</td><td class="num">3.8 GiB/s</td></tr>
+<tr><td>4k randread</td><td class="num">36.6k IOPS</td><td class="num">23.1k IOPS</td></tr>
+<tr><td>4k randwrite</td><td class="num">33.7k IOPS</td><td class="num">24.3k IOPS</td></tr>
+<tr><td>1M seq read</td><td class="num">637 MiB/s</td><td class="num">508 MiB/s</td></tr>
+<tr><td>1M seq write</td><td class="num">2.74 GiB/s</td><td class="num">2.70 GiB/s</td></tr>
 </table>
 
-<p>The gap runs ×1.4–×2.8 depending on the workload: on top of the backing IO, every ublk request pays a uring_cmd round trip and a memory copy through the per-tag buffer — the round trip dominates at 4&nbsp;KiB, the copy at 1&nbsp;MiB.</p>
+<p>The gap runs ×1.0–×1.6: every ublk request pays a uring_cmd round trip and a memory copy through the per-tag buffer on top of the backing IO, and that shows most on small random IO. At 1&nbsp;MiB sequential writes the two are indistinguishable — the disk itself is the wall.</p>
 
 <p>The trade fits in one line: <strong>dm-era is faster; ublkera trades that performance for change tracking that lives in userspace as an ordinary program</strong> — readable, testable, and easy to extend. This article's verification procedure and the volatile-metadata design are both products of that side of the trade.</p>
 
@@ -413,7 +413,7 @@ diff diff-hash.txt diff-era.txt \
 
 <p>ublk turns "I wish the kernel tracked this for me" into "I'll track it myself, it's my process anyway." The passthrough-plus-bookkeeping pattern is a genuinely small program — the era map is an array of atomics and two rules (stamp on completion, stamp with max) — and the parts that took real effort were exactly the parts that always do: verification methodology and threading defaults.</p>
 
-<p>Performance-wise, the userspace hop is not the bottleneck at backup-tool scale: against the same disk a single queue thread stayed within ×1.4–×2.8 of in-kernel dm-era across random and sequential workloads. If you need dm-era semantics in shapes dm-era is awkward about — devices that come and go, a fleet of them managed by one supervisor — building on ublk is a very reasonable place to stand.</p>
+<p>Performance-wise, the userspace hop is not the bottleneck at backup-tool scale: against the same disk a single queue thread stayed within ×1.6 of in-kernel dm-era on small random IO, and at parity on large sequential writes. If you need dm-era semantics in shapes dm-era is awkward about — devices that come and go, a fleet of them managed by one supervisor — building on ublk is a very reasonable place to stand.</p>
 
 <footer>
   Tested on Ubuntu 24.04 (guest kernel 6.8, QEMU/KVM, 4 vCPU) with fio 3.36.
