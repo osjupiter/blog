@@ -79,7 +79,7 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 
 <h2>What is ublk?</h2>
 
-<p>ublk was written by Ming Lei and merged in Linux 6.0 (2022), arriving quietly inside an io_uring pull request (<a href="https://lwn.net/Articles/903855/">LWN covered it</a>). The stated motivation was to move virtual block drivers out of the kernel: loop, nbd-style devices, and the long line of attempts to implement qcow2 as a kernel driver. A userspace block driver can be written in any language, link any library, be debugged like a normal program, and crash without taking the machine down.</p>
+<p>ublk is an io_uring-based framework for userspace block drivers, added in Linux 6.0. It exists so that virtual block devices — loop-alikes, nbd-style devices, image formats like qcow2 — can be implemented as ordinary userspace programs; details are in the <a href="https://docs.kernel.org/block/ublk.html">kernel documentation</a> and the <a href="https://lwn.net/Articles/903855/">LWN write-up</a>.</p>
 
 <h3>How a request reaches userspace</h3>
 

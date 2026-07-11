@@ -80,7 +80,7 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 
 <h2>そもそも ublk とは</h2>
 
-<p>ublk は Ming Lei によって書かれ、Linux 6.0(2022)に io_uring の pull request の中にひっそりと入ってマージされました(<a href="https://lwn.net/Articles/903855/">LWN の解説</a>)。掲げられた動機は、仮想ブロックドライバをカーネルの外に出すことです: loop、nbd 系のデバイス、そして何度も試みられてきた qcow2 のカーネルドライバ実装。ユーザ空間のブロックドライバなら、どんな言語でも書けて、どんなライブラリでもリンクできて、普通のプログラムとしてデバッグできて、クラッシュしてもマシンを道連れにしません。</p>
+<p>ublk は Linux 6.0 で追加された、io_uring ベースのユーザ空間ブロックドライバのためのフレームワークです。loop や nbd、qcow2 のような仮想ブロックデバイスをユーザ空間のプログラムとして実装するためのもので、詳細は<a href="https://docs.kernel.org/block/ublk.html">カーネルドキュメント</a>と <a href="https://lwn.net/Articles/903855/">LWN の解説</a>にあります。</p>
 
 <h3>リクエストがユーザ空間に届くまで</h3>
 
