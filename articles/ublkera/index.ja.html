@@ -76,7 +76,35 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 <h1>ublkera: ublk で作るユーザ空間版 dm-era 風チェンジトラッキング</h1>
 <p class="subtitle">カーネルの dirty block トラッカーをマルチデバイス対応のユーザ空間デーモンとして作り直す — 3つの独立した証拠による検証、キュー/CPU スケーリング実験、そしてログアウト後にだけ発火するバグ。</p>
 
-<h2>なぜ作ったか</h2>
+<p>Linux には <a href="https://docs.kernel.org/block/ublk.html">ublk</a> というドライバがあり、普通のプロセスがブロックデバイスを実装できます: カーネルが <code>/dev/ublkbN</code> を公開し、そこに来るすべてのリクエストがユーザ空間のコードに渡されて、完了させるのは自分、という仕組みです。これを使って <strong>ublkera</strong> を作りました — 任意のファイル/ブロックデバイスを ublk 経由で公開し、パススルーの上に dm-era 風のチェンジトラッキングを重ねるデーモンです。この記事は半分がプロジェクトの記録、半分が ublk そのもののフィールドノートです: どこから来たのか、リクエストは実際どうやってユーザ空間に届くのか、キュー/スレッドモデルは CPU スケーリングにとって何を意味するのか、そして道中の実測とバグたち。</p>
+
+<h2>そもそも ublk とは</h2>
+
+<p>ublk は Ming Lei によって書かれ、Linux 6.0(2022)に io_uring の pull request の中にひっそりと入ってマージされました(<a href="https://lwn.net/Articles/903855/">LWN の解説</a>)。掲げられた動機は、仮想ブロックドライバをカーネルの外に出すことです: loop、nbd 系のデバイス、そして何度も試みられてきた qcow2 のカーネルドライバ実装。ユーザ空間のブロックドライバなら、どんな言語でも書けて、どんなライブラリでもリンクできて、普通のプログラムとしてデバッグできて、クラッシュしてもマシンを道連れにしません。</p>
+
+<p>SPDK の親戚のように語られることもありますが、SPDK の派生ではありません — 関係はむしろ逆向きです。SPDK のようなユーザ空間ストレージスタックは NVMe-oF や vhost-user は喋れても、「ただの<em>ローカル</em>ブロックデバイス」として見せる正攻法を持っておらず、回避策は NBD の loopback か TCMU、どちらも io_uring 以前の設計の遅いパスでした。ublk はその欠けていた玄関口を io_uring ネイティブで作ったもので、いまでは SPDK 自身が <a href="https://spdk.io/doc/ublk.html">ublk ターゲット</a>を載せ、SPDK bdev をカーネルのブロックデバイスとして公開するのに使っています。</p>
+
+<h3>リクエストがユーザ空間に届くまで</h3>
+
+<p>制御もデータも io_uring に乗っています。制御プレーンは misc デバイス <code>/dev/ublk-control</code> で、サーバが <code>ADD_DEV</code>(キュー数・深さ・バッファサイズを交渉)を送ると、デバイスごとのキャラクタデバイス <code>/dev/ublkcN</code> — データプレーンのチャネル — が生まれます。サーバはリクエストディスクリプタ配列を mmap してデータプレーンを準備し、<code>START_DEV</code> を送る。実際のブロックデバイス <code>/dev/ublkbN</code> が現れるのはこの時点です。</p>
+
+<p>エレガントなのはデータプレーンです。HW キューごとにサーバは専用スレッドを1本立て、それぞれが自分の io_uring を持ちます。起動時にそのスレッドは、キュー内の全タグ(リクエストスロット)について <code>FETCH_REQ</code> という uring_cmd を <code>/dev/ublkcN</code> に対して発行します。このコマンドは完了しません — 待つのです。そして最初の fetch こそがキューとスレッドを<em>紐づける</em>操作です: ある (queue, tag) を fetch したスレッドがそのスロットのデーモンになり、以降そのスロットへのコマンドを発行できるのはそのスレッドだけになります。</p>
+
+<pre><code> app ──► /dev/ublkbN ──► blk-mq ──► ublk_drv               [カーネル]
+                                       │ (queue, tag) で待っている
+                                       │ FETCH_REQ を完了させる
+ ──────────────────────────────────────┼─────────────────────────
+                                       ▼             [ユーザ空間]
+                       キュースレッド + 専用 io_uring
+                         1. リクエストディスクリプタを読む (mmap 済み)
+                         2. バッキング IO を行う — これも io_uring 操作
+                         3. COMMIT_AND_FETCH_REQ(結果) を発行
+                            └─ /dev/ublkbN のリクエストを完了させ、
+                               同じタグを1ステップで再アームする</code></pre>
+
+<p>アプリの IO が <code>/dev/ublkbN</code> に来ると、blk-mq がキューと空きタグを選び、ublk_drv がその (queue, tag) で待っていた fetch を完了させます — ユーザ空間側のルーティングロジックはゼロのまま、正しいサーバスレッドだけが起きるわけです。スレッドはディスクリプタを読み、バッキング IO を行い(ublkera の場合: 同じリング上でバッキングファイルへの io_uring 操作をもう1発)、<code>COMMIT_AND_FETCH_REQ</code> で応答します。これはブロックリクエストの完了とタグの再アームを1ステップでやります。定常状態はキューごとにリング1本のタイトなループです: IO ごとの syscall はバッチされた <code>io_uring_enter</code> 以外になく、スレッド間の受け渡しもなく、キュー間で共有するロックもありません。</p>
+
+<h2>なぜ ublkera を作ったか</h2>
 
 <p><a href="../era-differential-backup/index.ja.html">以前の記事</a>では <code>dm-era</code> — どのブロックがどの「era」に書かれたかを追跡する device-mapper ターゲット — を使って、無停止の差分バックアップをやりました。ちゃんと動きますし、今でも気に入っています。ただ、しばらく使っていると使い勝手への不満が溜まってきました:</p>
 
@@ -86,9 +114,7 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 <li>ただのディスクイメージファイル(LV ではないもの)にトラッキングを付けるには、まず loop デバイスで包む必要がある。</li>
 </ul>
 
-<p>一方でカーネルには <a href="https://docs.kernel.org/block/ublk.html">ublk</a>(Linux 6.0+)が入りました。ブロックデバイスのデータパス全体を io_uring 経由でユーザ空間プロセスに委ねるドライバです。プロセスが <code>/dev/ublk-control</code> を開いてデバイスを作ると、以降 <code>/dev/ublkbN</code> に来る READ/WRITE/FLUSH/DISCARD はすべて自分のイベントループに届き、好きなように完了させられます。</p>
-
-<p>ここで気づきます: データパスがどのみちユーザ空間を通るなら、dirty block の追跡はただの「ついでの帳簿付け」です。そこで <strong>ublkera</strong> を作りました — バッキングファイルやブロックデバイスを ublk デバイスとして公開し、IO を 1:1 でパススルーしながら、どのチャンクがどの era に書かれたかを dm-era 方式で記録する常駐デーモンです。Rust 製で、<code>libublk</code> クレートの上に載っています。</p>
+<p>ここで上の ublk のリクエストループを思い出すと、答えは自明です: すべての書き込みはどのみち自分のプロセスを通るのだから、dirty block の追跡はただの「ついでの帳簿付け」です。ublkera はそのアイデアを常駐デーモン1つにしたものです — バッキングファイルやブロックデバイスを ublk デバイスとして公開し、IO を 1:1 でパススルーしながら、どのチャンクがどの era に書かれたかを dm-era 方式で記録します。Rust 製で、<code>libublk</code> クレートの上に載っています。</p>
 
 <pre><code>ublkera daemon (常駐、制御ソケット /run/ublkera/daemon.sock)
  ├─ デバイス0: supervisor thread ── /dev/ublkb0 ⇄ a.img   (eraマップ + メタデータ)
