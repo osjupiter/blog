@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ublkera: ublk で作るユーザ空間版 dm-era 風チェンジトラッキング</title>
-<meta name="description" content="カーネルの dirty block トラッカーを ublk 上のマルチデバイス・ユーザ空間デーモンとして作り直す — 3つの独立した証拠による検証、キュー/CPU スケーリング実験、そしてログアウト後にだけ発火するバグ。">
+<meta name="description" content="カーネルの dirty block トラッカーを ublk 上のマルチデバイス・ユーザ空間デーモンとして作り直す — 3つの独立した証拠による検証とキュー/CPU スケーリング実験。">
 <link rel="canonical" href="https://osjupiter.github.io/blog/articles/ublkera/index.ja.html">
 <link rel="alternate" hreflang="en" href="https://osjupiter.github.io/blog/articles/ublkera/">
 <link rel="alternate" hreflang="ja" href="https://osjupiter.github.io/blog/articles/ublkera/index.ja.html">
@@ -78,9 +78,9 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 <div class="lang-switch"><a href="../../">← 記事一覧</a><span><a href="./">EN</a> · <strong>日本語</strong></span></div>
 
 <h1>ublkera: ublk で作るユーザ空間版 dm-era 風チェンジトラッキング</h1>
-<p class="subtitle">カーネルの dirty block トラッカーをマルチデバイス対応のユーザ空間デーモンとして作り直す — 3つの独立した証拠による検証、キュー/CPU スケーリング実験、そしてログアウト後にだけ発火するバグ。</p>
+<p class="subtitle">カーネルの dirty block トラッカーをマルチデバイス対応のユーザ空間デーモンとして作り直す — 3つの独立した証拠による検証とキュー/CPU スケーリング実験。</p>
 
-<p>Linux には <a href="https://docs.kernel.org/block/ublk.html">ublk</a> というドライバがあり、普通のプロセスがブロックデバイスを実装できます: カーネルが <code>/dev/ublkbN</code> を公開し、そこに来るすべてのリクエストがユーザ空間のコードに渡されて、完了させるのは自分、という仕組みです。これを使って <strong>ublkera</strong> を作りました — 任意のファイル/ブロックデバイスを ublk 経由で公開し、パススルーの上に dm-era 風のチェンジトラッキングを重ねるデーモンです。この記事は半分がプロジェクトの記録、半分が ublk そのもののフィールドノートです: どこから来たのか、リクエストは実際どうやってユーザ空間に届くのか、キュー/スレッドモデルは CPU スケーリングにとって何を意味するのか、そして道中の実測とバグたち。</p>
+<p>Linux には <a href="https://docs.kernel.org/block/ublk.html">ublk</a> というドライバがあり、普通のプロセスがブロックデバイスを実装できます: カーネルが <code>/dev/ublkbN</code> を公開し、そこに来るすべてのリクエストがユーザ空間のコードに渡されて、完了させるのは自分、という仕組みです。これを使って <strong>ublkera</strong> を作りました — 任意のファイル/ブロックデバイスを ublk 経由で公開し、パススルーの上に dm-era 風のチェンジトラッキングを重ねるデーモンです。この記事は半分がプロジェクトの記録、半分が ublk そのもののフィールドノートです: どこから来たのか、リクエストは実際どうやってユーザ空間に届くのか、キュー/スレッドモデルは CPU スケーリングにとって何を意味するのか、そして道中の実測。</p>
 
 <h2>そもそも ublk とは</h2>
 
@@ -365,31 +365,6 @@ diff diff-hash.txt diff-era.txt \
 
 <p>プロジェクトには最終的に QEMU ベースのテスト環境が2つでき、どちらもホスト root 不要です: CI 的なチェック用の <strong>busybox initramfs VM</strong>(ホストカーネル + デーモンバイナリ + <code>ublk_drv.ko</code> だけで数秒で起動し E2E 一式を実行)と、対話的にいじるための <strong>Ubuntu cloud イメージのフル VM</strong>(上記のモジュール対策込みで cloud-init がプロビジョニング)。実ブロックデバイスはどこかで root が要ります — VM ならその「どこか」を使い捨てにできます。</p>
 
-<h2>ログアウト後にだけ発火するバグ</h2>
-
-<p>1つだけ、独立した節に値するバグがありました。メカニズムが古典だからです。症状: デーモンは正常に動き、テストスイートも全部通る……のに<em>翌日</em>、すべての <code>add</code> がこう失敗します:</p>
-
-<pre><code>{"error": "device for '/root/cbt-test.img' did not come up within 15s"}</code></pre>
-
-<p>デバイスノードは現れず、dmesg にも何もなし。そして本当に混乱させられたのは、同じマシンで新しく起動したデーモンなら即座に成功することでした。壊れているのは長時間動いているデーモンだけ。<code>add</code> 実行中のデーモンを <code>strace</code> すると、動かぬ証拠が2行:</p>
-
-<pre><code>write(1, "\n", 1)                                = -1 EIO
-write(2, "\nthread 'ublkera-dev-/root/cbt-t"..., 203) = -1 EIO</code></pre>
-
-<p>デバイス自体は正常に作成できていました。その直後、「device ready」フックが libublk のヘルパーを呼び、それがデバイス情報を stdout に <code>println!</code> します。デーモンは stdio を<em>引き継いだまま</em>デーモン化していて、それは起動元 ssh セッションの pty を指したままでした。セッションが終わると pty は死に、次の write が <code>EIO</code> を返し、そして Rust では失敗した <code>println!</code> は <strong>panic</strong> します。panic は readiness を報告する前に supervisor スレッドを巻き戻し、作られたばかりのデバイスも道連れにしました。かくして「日中はずっと動くのに、ログアウトすると壊れる」が完成します。</p>
-
-<p>修正は3つ、それぞれ単独でも価値があるものです:</p>
-
-<ul style="margin: 0 0 16px 24px;">
-<li>デーモン化時に stdio を <code>/dev/null</code> に切り離す — 親の端末を握ったままのバックグラウンドデーモンは、ログアウトをトリガーにした時限爆弾です。</li>
-<li>デーモン側のコードパスでは stdout に一切出力しない。応答は制御ソケットへ、診断はログへ。</li>
-<li>「起動スレッドが死んだ」(ready チャネルの切断 — panic を即座に報告)と「起動が遅い」(15秒タイムアウト)を区別する。誤解を招くタイムアウトメッセージがデバッグ時間の大半を奪いました。</li>
-</ul>
-
-<div class="callout danger">
-<strong>一般化できる教訓:</strong> 端末の fd を引き継いだ長寿命プロセスは、その端末が閉じる瞬間に予約された潜在障害を抱えています。しかも print の失敗が致命的な言語(Rust の <code>println!</code>、Python の <code>BrokenPipeError</code>)では、離れた場所で、無関係に見えるスタックトレースとともに、派手に死にます。
-</div>
-
 <h2>dm-era vs ublkera</h2>
 
 <table>
@@ -406,7 +381,7 @@ write(2, "\nthread 'ublkera-dev-/root/cbt-t"..., 203) = -1 EIO</code></pre>
 
 <h2>まとめ</h2>
 
-<p>ublk は「カーネルがこれを追跡してくれたらいいのに」を「自分のプロセスなんだから自分で追跡すればいい」に変えてくれます。パススルー + 帳簿付けというパターンは本当に小さなプログラムで済み — era マップはアトミック値の配列と2つのルール(完了時に刻印、max で刻印)だけ — 本当に手間がかかったのは、いつも手間がかかるところでした: 検証の方法論、スレッドのデフォルト、そして ublk より古くからあるデーモンのライフサイクルバグです。</p>
+<p>ublk は「カーネルがこれを追跡してくれたらいいのに」を「自分のプロセスなんだから自分で追跡すればいい」に変えてくれます。パススルー + 帳簿付けというパターンは本当に小さなプログラムで済み — era マップはアトミック値の配列と2つのルール(完了時に刻印、max で刻印)だけ — 本当に手間がかかったのは、いつも手間がかかるところでした: 検証の方法論とスレッドのデフォルトです。</p>
 
 <p>性能面では、バックアップツールの規模においてユーザ空間経由はボトルネックになりません: キュースレッド1本で控えめな仮想ハードウェア上でも 4k IOPS 約5万、キューを増やせばコア数までほぼ線形に伸び、シーケンシャル IO はリクエストサイズのままパススルーされます。dm-era が苦手とする形 — 出たり消えたりするデバイス、1つのスーパーバイザで管理したいデバイス群 — に dm-era のセマンティクスが欲しいなら、ublk の上に建てるのはかなり妥当な立地です。</p>
 
