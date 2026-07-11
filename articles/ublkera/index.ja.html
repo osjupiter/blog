@@ -363,8 +363,6 @@ diff diff-hash.txt diff-era.txt \
      4100    3.38   50.12   53.50    2  |__ublkera-dev-/de
      4101    3.75   49.38   53.12    3  |__ublkera-dev-/de</code></pre>
 
-<p>実務的な注意を1つ: この絵がここまできれいなのは、バッキングが <code>O_DIRECT</code> を使えるからです。同じ実験を tmpfs 上のファイルで回すと(tmpfs は O_DIRECT 非対応)、バッファードの io_uring 操作がカーネルの io-wq ワーカーに punt され、<code>pidstat</code> が勝手に CPU を使う <code>iou-wrk-*</code> スレッドで埋まります。バッキングを <code>brd</code> にすると完了はキュースレッド内で完結し、しかも速くなります: シングルキューで 49.6k → 67.5k IOPS。</p>
-
 <h3>3. cloud イメージのカーネルに ublk_drv は入っていない</h3>
 
 <p>小さいけれど時間を食った話: Ubuntu の cloud イメージには <code>ublk_drv.ko</code> が入っていません — <code>linux-modules-extra</code> に入っていて、cloud 向けカーネルフレーバーはそれを引き込まないのです。cloud イメージから作ったテスト VM では、<code>apt install linux-modules-extra-$(uname -r)</code> するまで <code>modprobe ublk_drv</code> が失敗します。cloud-init に焼き込んで忘れましょう。</p>

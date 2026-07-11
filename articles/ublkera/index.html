@@ -362,8 +362,6 @@ diff diff-hash.txt diff-era.txt \
      4100    3.38   50.12   53.50    2  |__ublkera-dev-/de
      4101    3.75   49.38   53.12    3  |__ublkera-dev-/de</code></pre>
 
-<p>One practical note: the backing store must support <code>O_DIRECT</code> for the picture to stay this clean. An earlier round of the same experiment used a file on tmpfs, which can't do O_DIRECT — every buffered io_uring operation got punted to kernel io-wq workers, and <code>pidstat</code> filled up with <code>iou-wrk-*</code> threads burning CPU on their own. Switching the backing to <code>brd</code> keeps completions inline on the queue thread, and is faster too: 67.5k vs 49.6k IOPS in the single-queue case.</p>
-
 <h3>3. Cloud kernels don't ship ublk_drv</h3>
 
 <p>Small but time-consuming: Ubuntu cloud images don't include <code>ublk_drv.ko</code> — it lives in <code>linux-modules-extra</code>, which the cloud kernel flavor doesn't pull in. If your test VM is built from a cloud image, <code>modprobe ublk_drv</code> fails until you <code>apt install linux-modules-extra-$(uname -r)</code>. Bake it into cloud-init and forget about it.</p>
