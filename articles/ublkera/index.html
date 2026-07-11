@@ -3,14 +3,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ublkera: dm-era-style Change Tracking in Userspace with ublk</title>
+<title>ublkera: dm-era-style Changed Block Tracking in Userspace with ublk</title>
 <meta name="description" content="Rebuilding the kernel's dirty-block tracker as a multi-device userspace daemon on ublk — verification by three independent witnesses and queue/CPU scaling experiments.">
 <link rel="canonical" href="https://osjupiter.github.io/blog/articles/ublkera/">
 <link rel="alternate" hreflang="en" href="https://osjupiter.github.io/blog/articles/ublkera/">
 <link rel="alternate" hreflang="ja" href="https://osjupiter.github.io/blog/articles/ublkera/index.ja.html">
 <link rel="alternate" hreflang="x-default" href="https://osjupiter.github.io/blog/articles/ublkera/">
 <meta property="og:site_name" content="osjupiter">
-<meta property="og:title" content="ublkera: dm-era-style Change Tracking in Userspace with ublk">
+<meta property="og:title" content="ublkera: dm-era-style Changed Block Tracking in Userspace with ublk">
 <meta property="og:description" content="Rebuilding the kernel's dirty-block tracker as a multi-device userspace daemon on ublk — verification, queue/CPU scaling experiments, and lessons learned.">
 <meta property="og:type" content="article">
 <meta property="og:url" content="https://osjupiter.github.io/blog/articles/ublkera/">
@@ -19,7 +19,7 @@
 {
   "@context": "https://schema.org",
   "@type": "TechArticle",
-  "headline": "ublkera: dm-era-style Change Tracking in Userspace with ublk",
+  "headline": "ublkera: dm-era-style Changed Block Tracking in Userspace with ublk",
   "description": "Rebuilding the kernel's dirty-block tracker as a multi-device userspace daemon on ublk — verification, queue/CPU scaling experiments, and lessons learned.",
   "url": "https://osjupiter.github.io/blog/articles/ublkera/",
   "datePublished": "2026-07-12",
@@ -76,10 +76,10 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 <div class="container">
 <div class="lang-switch"><a href="../../">← index</a><span><strong>EN</strong> · <a href="index.ja.html">日本語</a></span></div>
 
-<h1>ublkera: dm-era-style Change Tracking in Userspace with ublk</h1>
+<h1>ublkera: dm-era-style Changed Block Tracking in Userspace with ublk</h1>
 <p class="subtitle">Rebuilding the kernel's dirty-block tracker as a multi-device userspace daemon — verification by three independent witnesses and queue/CPU scaling experiments.</p>
 
-<p>Linux has a driver called <a href="https://docs.kernel.org/block/ublk.html">ublk</a> that lets an ordinary process implement a block device: the kernel exposes <code>/dev/ublkbN</code>, and every request that hits it is handed to your userspace code to complete. I used it to build <strong>ublkera</strong> — a daemon that exposes any file or block device through ublk and layers dm-era-style change tracking on top of the passthrough. This article is half project write-up, half field notes on ublk itself: where it came from, how a request actually reaches userspace, what the queue/thread model means for CPU scaling, and the measurements along the way.</p>
+<p>Linux has a driver called <a href="https://docs.kernel.org/block/ublk.html">ublk</a> that lets an ordinary process implement a block device: the kernel exposes <code>/dev/ublkbN</code>, and every request that hits it is handed to your userspace code to complete. I used it to build <strong>ublkera</strong> — a daemon that exposes any file or block device through ublk and layers dm-era-style changed-block tracking (CBT) on top of the passthrough. This article is half project write-up, half field notes on ublk itself: where it came from, how a request actually reaches userspace, what the queue/thread model means for CPU scaling, and the measurements along the way.</p>
 
 <h2>What is ublk?</h2>
 
@@ -213,13 +213,6 @@ diff diff-hash.txt diff-era.txt \
   &amp;&amp; echo "MATCH: hash diff == era diff == written chunks"</code></pre>
 
 <p>All three agree: 20 chunks written, 20 chunks changed by hash, 20 chunks reported by the tracker, same numbers. The partial-write case is covered for free — a 4&nbsp;KiB write in the middle of a chunk must flip that <em>whole</em> chunk to dirty, and does.</p>
-
-<div class="callout warn">
-<strong>Three traps in this seemingly simple test.</strong>
-(1) The hash block size must equal the tracking granularity, or the comparison is meaningless — the tracker can only ever answer in chunk units.
-(2) The era diff is formally a <em>superset</em> of the hash diff: rewriting identical data dirties the map but not the hash. Writing <code>/dev/urandom</code> makes a same-hash overwrite vanishingly unlikely, turning ⊇ into =.
-(3) Mixing <code>O_DIRECT</code> writes with buffered reads serves you stale page cache and phantom differences — drop caches (or use direct reads) before each hash pass.
-</div>
 
 <h2>What I learned about ublk</h2>
 
@@ -361,19 +354,19 @@ diff diff-hash.txt diff-era.txt \
 
 <table>
 <tr><th>configuration</th><th class="num">daemon CPU (all threads)</th><th class="num">IOPS</th></tr>
-<tr><td>1 device, <code>-q 1</code> (default)</td><td class="num">≈63% — a single queue thread</td><td class="num">67.5k</td></tr>
-<tr><td>1 device, <code>-q 4</code></td><td class="num">≈214% — four queue threads on four cores</td><td class="num"><strong>188k</strong></td></tr>
-<tr><td>2 devices, <code>-q 1</code> each</td><td class="num">≈121% — one thread per device, different cores</td><td class="num">53k + 53k</td></tr>
+<tr><td>1 device, <code>-q 1</code> (default)</td><td class="num">≈63% — a single queue thread</td><td class="num">66.7k</td></tr>
+<tr><td>1 device, <code>-q 4</code></td><td class="num">≈217% — four queue threads on four cores</td><td class="num"><strong>188k</strong></td></tr>
+<tr><td>2 devices, <code>-q 1</code> each</td><td class="num">≈121% — one thread per device, different cores</td><td class="num">52k + 53k</td></tr>
 </table>
 
 <p><code>pidstat -t</code> during the <code>-q 4</code> run shows the shape directly — four queue threads, one per core, and nothing else:</p>
 
 <pre><code>      TID    %usr %system   %CPU   CPU  Command
-        -   15.62  198.00  213.62    3  ublkera
-     4098    4.12   49.38   53.50    0  |__ublkera-dev-/de
-     4099    4.12   49.38   53.50    1  |__ublkera-dev-/de
-     4100    3.38   50.12   53.50    2  |__ublkera-dev-/de
-     4101    3.75   49.38   53.12    3  |__ublkera-dev-/de</code></pre>
+        -   16.88  199.88  216.75    1  ublkera
+     3194    4.12   50.00   54.12    0  |__ublkb0-q0
+     3195    3.88   50.38   54.25    1  |__ublkb0-q1
+     3196    4.25   49.88   54.12    2  |__ublkb0-q2
+     3197    4.25   50.00   54.25    3  |__ublkb0-q3</code></pre>
 
 <h2>dm-era vs ublkera</h2>
 

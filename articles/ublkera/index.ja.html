@@ -3,14 +3,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ublkera: ublk で作るユーザ空間版 dm-era 風チェンジトラッキング</title>
+<title>ublkera: ublk で作るユーザ空間版 dm-era 風 CBT(Changed Block Tracking)</title>
 <meta name="description" content="カーネルの dirty block トラッカーを ublk 上のマルチデバイス・ユーザ空間デーモンとして作り直す — 3つの独立した証拠による検証とキュー/CPU スケーリング実験。">
 <link rel="canonical" href="https://osjupiter.github.io/blog/articles/ublkera/index.ja.html">
 <link rel="alternate" hreflang="en" href="https://osjupiter.github.io/blog/articles/ublkera/">
 <link rel="alternate" hreflang="ja" href="https://osjupiter.github.io/blog/articles/ublkera/index.ja.html">
 <link rel="alternate" hreflang="x-default" href="https://osjupiter.github.io/blog/articles/ublkera/">
 <meta property="og:site_name" content="osjupiter">
-<meta property="og:title" content="ublkera: ublk で作るユーザ空間版 dm-era 風チェンジトラッキング">
+<meta property="og:title" content="ublkera: ublk で作るユーザ空間版 dm-era 風 CBT(Changed Block Tracking)">
 <meta property="og:description" content="カーネルの dirty block トラッカーを ublk 上のマルチデバイス・ユーザ空間デーモンとして作り直す — 検証、キュー/CPU スケーリング実験、得られた教訓。">
 <meta property="og:type" content="article">
 <meta property="og:url" content="https://osjupiter.github.io/blog/articles/ublkera/index.ja.html">
@@ -19,7 +19,7 @@
 {
   "@context": "https://schema.org",
   "@type": "TechArticle",
-  "headline": "ublkera: ublk で作るユーザ空間版 dm-era 風チェンジトラッキング",
+  "headline": "ublkera: ublk で作るユーザ空間版 dm-era 風 CBT(Changed Block Tracking)",
   "description": "カーネルの dirty block トラッカーを ublk 上のマルチデバイス・ユーザ空間デーモンとして作り直す — 検証、キュー/CPU スケーリング実験、得られた教訓。",
   "url": "https://osjupiter.github.io/blog/articles/ublkera/index.ja.html",
   "inLanguage": "ja",
@@ -77,10 +77,10 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 <div class="container">
 <div class="lang-switch"><a href="../../">← 記事一覧</a><span><a href="./">EN</a> · <strong>日本語</strong></span></div>
 
-<h1>ublkera: ublk で作るユーザ空間版 dm-era 風チェンジトラッキング</h1>
+<h1>ublkera: ublk で作るユーザ空間版 dm-era 風 CBT(Changed Block Tracking)</h1>
 <p class="subtitle">カーネルの dirty block トラッカーをマルチデバイス対応のユーザ空間デーモンとして作り直す — 3つの独立した証拠による検証とキュー/CPU スケーリング実験。</p>
 
-<p>Linux には <a href="https://docs.kernel.org/block/ublk.html">ublk</a> というドライバがあり、普通のプロセスがブロックデバイスを実装できます: カーネルが <code>/dev/ublkbN</code> を公開し、そこに来るすべてのリクエストがユーザ空間のコードに渡されて、完了させるのは自分、という仕組みです。これを使って <strong>ublkera</strong> を作りました — 任意のファイル/ブロックデバイスを ublk 経由で公開し、パススルーの上に dm-era 風のチェンジトラッキングを重ねるデーモンです。この記事は半分がプロジェクトの記録、半分が ublk そのもののフィールドノートです: どこから来たのか、リクエストは実際どうやってユーザ空間に届くのか、キュー/スレッドモデルは CPU スケーリングにとって何を意味するのか、そして道中の実測。</p>
+<p>Linux には <a href="https://docs.kernel.org/block/ublk.html">ublk</a> というドライバがあり、普通のプロセスがブロックデバイスを実装できます: カーネルが <code>/dev/ublkbN</code> を公開し、そこに来るすべてのリクエストがユーザ空間のコードに渡されて、完了させるのは自分、という仕組みです。これを使って <strong>ublkera</strong> を作りました — 任意のファイル/ブロックデバイスを ublk 経由で公開し、パススルーの上に dm-era 風の CBT(変更ブロック追跡)を重ねるデーモンです。この記事は半分がプロジェクトの記録、半分が ublk そのもののフィールドノートです: どこから来たのか、リクエストは実際どうやってユーザ空間に届くのか、キュー/スレッドモデルは CPU スケーリングにとって何を意味するのか、そして道中の実測。</p>
 
 <h2>そもそも ublk とは</h2>
 
@@ -214,13 +214,6 @@ diff diff-hash.txt diff-era.txt \
   &amp;&amp; echo "MATCH: hash diff == era diff == written chunks"</code></pre>
 
 <p>3つは一致しました: 書いたのは 20 チャンク、ハッシュが変わったのも 20 チャンク、トラッカーが報告したのも同じ 20 チャンク。部分書き込みのケースも自動的にカバーされます — チャンクの真ん中への 4&nbsp;KiB 書き込みはその<em>チャンク全体</em>を dirty にしなければならず、実際そうなりました。</p>
-
-<div class="callout warn">
-<strong>単純に見えるこのテストに潜む3つの罠。</strong>
-(1) ハッシュのブロック長はトラッキングの granularity と一致させること。トラッカーはチャンク単位でしか答えられないので、ずれると比較自体が無意味になります。
-(2) era 差分は形式的にはハッシュ差分の<em>上位集合</em>です: 同一データの上書きはマップを dirty にしますがハッシュは変えません。<code>/dev/urandom</code> を書けば同一ハッシュの上書きはまず起こらず、⊇ が = になります。
-(3) <code>O_DIRECT</code> の書き込みとバッファードの読み出しを混ぜると、古いページキャッシュを読んで幻の差分が出ます — 各ハッシュパスの前にキャッシュを落とす(か direct read を使う)こと。
-</div>
 
 <h2>ublk についてわかったこと</h2>
 
@@ -362,19 +355,19 @@ diff diff-hash.txt diff-era.txt \
 
 <table>
 <tr><th>構成</th><th class="num">デーモン CPU(全スレッド)</th><th class="num">IOPS</th></tr>
-<tr><td>1デバイス、<code>-q 1</code>(既定)</td><td class="num">≈63% — キュースレッド1本</td><td class="num">67.5k</td></tr>
-<tr><td>1デバイス、<code>-q 4</code></td><td class="num">≈214% — キュースレッド4本が4コアに</td><td class="num"><strong>188k</strong></td></tr>
-<tr><td>2デバイス、各 <code>-q 1</code></td><td class="num">≈121% — デバイスごとに1本、別コアに</td><td class="num">53k + 53k</td></tr>
+<tr><td>1デバイス、<code>-q 1</code>(既定)</td><td class="num">≈63% — キュースレッド1本</td><td class="num">66.7k</td></tr>
+<tr><td>1デバイス、<code>-q 4</code></td><td class="num">≈217% — キュースレッド4本が4コアに</td><td class="num"><strong>188k</strong></td></tr>
+<tr><td>2デバイス、各 <code>-q 1</code></td><td class="num">≈121% — デバイスごとに1本、別コアに</td><td class="num">52k + 53k</td></tr>
 </table>
 
 <p><code>-q 4</code> 実行中の <code>pidstat -t</code> がその形をそのまま見せてくれます — キュースレッド4本、1コアに1本ずつ、それ以外は何もいません:</p>
 
 <pre><code>      TID    %usr %system   %CPU   CPU  Command
-        -   15.62  198.00  213.62    3  ublkera
-     4098    4.12   49.38   53.50    0  |__ublkera-dev-/de
-     4099    4.12   49.38   53.50    1  |__ublkera-dev-/de
-     4100    3.38   50.12   53.50    2  |__ublkera-dev-/de
-     4101    3.75   49.38   53.12    3  |__ublkera-dev-/de</code></pre>
+        -   16.88  199.88  216.75    1  ublkera
+     3194    4.12   50.00   54.12    0  |__ublkb0-q0
+     3195    3.88   50.38   54.25    1  |__ublkb0-q1
+     3196    4.25   49.88   54.12    2  |__ublkb0-q2
+     3197    4.25   50.00   54.25    3  |__ublkb0-q3</code></pre>
 
 <h2>dm-era vs ublkera</h2>
 
