@@ -107,13 +107,13 @@ td { color: var(--fg); }
 .diagram svg { background: var(--bg2); border-radius: 6px; border: 1px solid #222; }
 
 footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: var(--fg2); font-size: 0.85em; text-align: center; }
-.lang-switch { text-align: right; font-family: 'JetBrains Mono', monospace; font-size: 0.8em; color: #555; margin-bottom: 16px; }
+.lang-switch { display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 0.8em; color: #555; margin-bottom: 16px; }
 .lang-switch strong { color: #ccc; font-weight: 600; }
 </style>
 </head>
 <body>
 <div class="container">
-<div class="lang-switch"><strong>EN</strong> · <a href="index.ja.html">日本語</a></div>
+<div class="lang-switch"><a href="../../">← index</a><span><strong>EN</strong> · <a href="index.ja.html">日本語</a></span></div>
 
 <h1>Visualizing Linux Block I/O: How LVM, ZFS, and Btrfs Actually Write to Disk</h1>
 <p class="subtitle">Animated blktrace visualizations showing write amplification, COW behavior, and snapshot overhead across storage stacks.</p>

@@ -128,13 +128,13 @@ td { color: var(--fg); }
 .result-box .label { font-size: 0.9em; color: var(--fg2); margin-top: 4px; }
 
 footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: var(--fg2); font-size: 0.85em; text-align: center; }
-.lang-switch { text-align: right; font-family: 'JetBrains Mono', monospace; font-size: 0.8em; color: #555; margin-bottom: 16px; }
+.lang-switch { display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 0.8em; color: #555; margin-bottom: 16px; }
 .lang-switch strong { color: #ccc; font-weight: 600; }
 </style>
 </head>
 <body>
 <div class="container">
-<div class="lang-switch"><strong>EN</strong> · <a href="index.ja.html">日本語</a></div>
+<div class="lang-switch"><a href="../../">← index</a><span><strong>EN</strong> · <a href="index.ja.html">日本語</a></span></div>
 
 <h1>Zero-Downtime Differential Backup with dm-era + LVM Snapshots</h1>
 <p class="subtitle">Using the kernel's dirty block tracker to copy only what changed, without stopping the device.</p>

@@ -34,9 +34,9 @@ Claude when the article is added. Rules:
 - Tone: 技術ブログのです・ます調. Keep technical terms English where Japanese
   engineers normally would (fsync, COW, blktrace, dm-era, …). Do not translate
   code blocks, commands, identifiers, or viz control/button labels.
-- Language switcher right after `<div class="container">`:
-  - EN page: `<div class="lang-switch"><strong>EN</strong> · <a href="index.ja.html">日本語</a></div>`
-  - JA page: `<div class="lang-switch"><a href="./">EN</a> · <strong>日本語</strong></div>`
+- Top bar (back link + language switcher) right after `<div class="container">`:
+  - EN page: `<div class="lang-switch"><a href="../../">← index</a><span><strong>EN</strong> · <a href="index.ja.html">日本語</a></span></div>`
+  - JA page: `<div class="lang-switch"><a href="../../">← 記事一覧</a><span><a href="./">EN</a> · <strong>日本語</strong></span></div>`
   - plus the `.lang-switch` CSS rules (copy from an existing article).
 - **When the English article changes, update `index.ja.html` in the same commit.**
 - `build_index.py` auto-detects `index.ja.html` and adds the 日本語 link on the

@@ -108,13 +108,13 @@ td { color: var(--fg); }
 .diagram svg { background: var(--bg2); border-radius: 6px; border: 1px solid #222; }
 
 footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: var(--fg2); font-size: 0.85em; text-align: center; }
-.lang-switch { text-align: right; font-family: 'JetBrains Mono', monospace; font-size: 0.8em; color: #555; margin-bottom: 16px; }
+.lang-switch { display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 0.8em; color: #555; margin-bottom: 16px; }
 .lang-switch strong { color: #ccc; font-weight: 600; }
 </style>
 </head>
 <body>
 <div class="container">
-<div class="lang-switch"><a href="./">EN</a> · <strong>日本語</strong></div>
+<div class="lang-switch"><a href="../../">← 記事一覧</a><span><a href="./">EN</a> · <strong>日本語</strong></span></div>
 
 <h1>LinuxブロックI/Oの可視化：LVM・ZFS・Btrfsは実際どのようにディスクへ書き込むのか</h1>
 <p class="subtitle">blktraceで記録したI/Oをアニメーション可視化し、ストレージスタックごとのwrite amplification（書き込み増幅）、COWの挙動、スナップショットのオーバーヘッドを観察します。</p>
