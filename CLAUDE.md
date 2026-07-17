@@ -41,3 +41,29 @@ Claude when the article is added. Rules:
 - **When the English article changes, update `index.ja.html` in the same commit.**
 - `build_index.py` auto-detects `index.ja.html` and adds the 日本語 link on the
   index and the URL to the sitemap — no generator changes needed per article.
+
+## Prose style & proofreading (校閲)
+
+When writing or proofreading article prose, fetch and apply these two style
+guides by k16shikano (fetch the raw gist content before editing):
+
+- **japanese-tech-writing** — baseline rulebook for `index.ja.html` prose.
+  https://gist.github.com/k16shikano/fd287c3133457c4fd8f5601d34aa817d
+  Key rules: no dashes (—/―) in Japanese prose or headings (use （） or split
+  sentences); no 中黒（・）for parallel lists; paragraph writing (one topic per
+  paragraph, first sentence states it); causal claims must state the mechanism;
+  negate propositions precisely (quote what you deny); no LLM-ish filler
+  (「重要なのは」「本章では〜を見ていく」「多角的」…); headings name the
+  content, not the procedure; don't reduce multi-cause phenomena to one cause.
+- **cognitive-rhythm-writing** — narrative pacing, applied on top of the above.
+  https://gist.github.com/k16shikano/eb2929f13ed19c97188393d297be8432
+  Key ideas: keep one unresolved tension open; alternate assertion and
+  hesitation; 立てる→流す→止める sentence rhythm; the "talk test" — keep
+  sentences that update the *situation* (facts, data, narrator judgment),
+  delete sentences that only describe the *document* (progress announcements,
+  self-summaries); devices are realized in content, never announced.
+
+Avoid direct-translation calques in Japanese (e.g. 「〜が住んでいる」「USB 税」
+style metaphors); say it plainly. English prose has no designated guide: mirror
+the JA version's structure and tension, and check grammar mechanically
+(no dangling modifiers, no verbless fragments, subjects doing the acting).
