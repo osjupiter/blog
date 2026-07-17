@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PLP は fsync をどれだけ速くするのか: 中古エンタープライズ SSD とコンシューマ NVMe の比較</title>
+<meta name="description" content="dm-snapshot の flush コストをきっかけに、オークションで中古の Intel DC S3710 を入手しました。SATA スロットの空きがなく USB ブリッジ経由という不利な接続でも、fdatasync を伴う書き込みでは PLP 付きドライブが優位でした。その理由を物理 FLUSH の計測で確かめます。">
+<link rel="canonical" href="https://osjupiter.github.io/blog/articles/plp-fsync/index.ja.html">
+<link rel="alternate" hreflang="en" href="https://osjupiter.github.io/blog/articles/plp-fsync/">
+<link rel="alternate" hreflang="ja" href="https://osjupiter.github.io/blog/articles/plp-fsync/index.ja.html">
+<link rel="alternate" hreflang="x-default" href="https://osjupiter.github.io/blog/articles/plp-fsync/">
+<meta property="og:site_name" content="osjupiter">
+<meta property="og:title" content="PLP は fsync をどれだけ速くするのか: 中古エンタープライズ SSD とコンシューマ NVMe の比較">
+<meta property="og:description" content="dm-snapshot の flush コストをきっかけに、オークションで中古の Intel DC S3710 を入手しました。SATA スロットの空きがなく USB ブリッジ経由という不利な接続でも、fdatasync を伴う書き込みでは PLP 付きドライブが優位でした。その理由を物理 FLUSH の計測で確かめます。">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://osjupiter.github.io/blog/articles/plp-fsync/index.ja.html">
+<meta name="twitter:card" content="summary">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "PLP は fsync をどれだけ速くするのか: 中古エンタープライズ SSD とコンシューマ NVMe の比較",
+  "description": "dm-snapshot の flush コストをきっかけに、オークションで中古の Intel DC S3710 を入手しました。SATA スロットの空きがなく USB ブリッジ経由という不利な接続でも、fdatasync を伴う書き込みでは PLP 付きドライブが優位でした。その理由を物理 FLUSH の計測で確かめます。",
+  "url": "https://osjupiter.github.io/blog/articles/plp-fsync/index.ja.html",
+  "inLanguage": "ja",
+  "datePublished": "2026-07-17",
+  "dateModified": "2026-07-17",
+  "author": {"@type": "Person", "name": "osjupiter", "url": "https://github.com/osjupiter"}
+}
+</script>
+<style>
+:root {
+  --bg: #0c0c0c;
+  --bg2: #151515;
+  --bg3: #1a1a1a;
+  --fg: #d4d4d4;
+  --fg2: #888;
+  --accent: #0af;
+  --orange: #f80;
+  --red: #f44;
+  --green: #0f6;
+  --purple: #c6f;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; line-height: 1.7; }
+.container { max-width: 860px; margin: 0 auto; padding: 40px 24px; }
+h1 { font-size: 2em; line-height: 1.3; margin-bottom: 8px; color: #fff; }
+.subtitle { color: var(--fg2); font-size: 1.05em; margin-bottom: 40px; }
+h2 { font-size: 1.4em; margin: 48px 0 16px; color: #eee; border-bottom: 1px solid #222; padding-bottom: 8px; }
+h3 { font-size: 1.15em; margin: 32px 0 12px; color: #ccc; }
+p { margin-bottom: 16px; color: var(--fg); }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { background: var(--bg3); padding: 2px 6px; border-radius: 3px; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.9em; color: #ddd; }
+pre { background: var(--bg2); padding: 16px; border-radius: 6px; overflow-x: auto; margin: 16px 0; border: 1px solid #222; }
+pre code { background: none; padding: 0; font-size: 0.85em; }
+.callout { background: var(--bg2); border-left: 3px solid var(--accent); padding: 16px 20px; margin: 20px 0; border-radius: 0 6px 6px 0; }
+.callout.warn { border-left-color: var(--orange); }
+.callout.danger { border-left-color: var(--red); }
+.callout.ok { border-left-color: var(--green); }
+.callout strong { color: #eee; }
+table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.9em; }
+th, td { padding: 8px 12px; border: 1px solid #222; text-align: left; }
+th { background: var(--bg2); color: #ccc; font-weight: 600; }
+td { color: var(--fg); }
+.num { text-align: right; font-family: 'JetBrains Mono', monospace; }
+footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: var(--fg2); font-size: 0.85em; text-align: center; }
+.lang-switch { display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 0.8em; color: #555; margin-bottom: 16px; }
+.lang-switch strong { color: #ccc; font-weight: 600; }
+.fig { margin: 24px 0; }
+.fig svg { width: 100%; height: auto; display: block; background: var(--bg2); border: 1px solid #222; border-radius: 6px; }
+.fig text { font-family: 'JetBrains Mono', 'Fira Code', monospace; }
+.figcap { font-size: 0.85em; color: var(--fg2); margin-top: 8px; text-align: center; }
+.panels { display: flex; gap: 12px; flex-wrap: wrap; }
+.panel { flex: 1 1 380px; min-width: 300px; position: relative; }
+.panel h4 { font-size: 0.9em; color: #ccc; margin: 0 0 6px; font-family: 'JetBrains Mono', monospace; font-weight: 600; }
+.chart-tip { position: absolute; pointer-events: none; background: var(--bg3); border: 1px solid #333;
+  border-radius: 6px; padding: 8px 10px; font-size: 0.75em; display: none; z-index: 3;
+  font-family: 'JetBrains Mono', monospace; box-shadow: 0 2px 10px rgba(0,0,0,.5); }
+.chart-tip .tn { color: var(--fg2); margin-bottom: 4px; }
+.chart-tip .row { display: flex; align-items: center; gap: 7px; margin-top: 2px; }
+.chart-tip .row .stroke { width: 12px; border-top: 2.5px solid; border-radius: 2px; }
+.chart-tip .row b { color: #fff; }
+.chart-tip .row span.name { color: var(--fg2); }
+.chart-legend { display: flex; gap: 20px; align-items: center; font-size: 0.8em; color: var(--fg2);
+  margin-bottom: 10px; font-family: 'JetBrains Mono', monospace; }
+.chart-legend .key { display: inline-flex; align-items: center; gap: 7px; }
+.chart-legend .stroke { width: 18px; height: 0; border-top: 2.5px solid; border-radius: 2px; }
+</style>
+</head>
+<body>
+<div class="container">
+<div class="lang-switch"><a href="../../">← 記事一覧</a><span><a href="./">EN</a> · <strong>日本語</strong></span></div>
+
+<h1>PLP は fsync をどれだけ速くするのか: 中古エンタープライズ SSD とコンシューマ NVMe の比較</h1>
+<p class="subtitle">dm-snapshot の flush コストをきっかけに、オークションで中古の Intel DC S3710 を入手しました。SATA スロットの空きがなく USB ブリッジ経由という不利な接続でも、fdatasync を伴う書き込みでは PLP 付きドライブが優位でした。その理由を物理 FLUSH の計測で確かめます。</p>
+
+<p>この実験は、<a href="../block-trace-viz/index.ja.html">以前の記事</a>で見つけた遅さから始まりました。blktrace のアニメーションを作っていたとき、dm-snapshot にスナップショットを作らせた途端、4k ランダム書き込みが 16,000 IOPS から 430 まで落ちたのです。あのときの trace でステップごとの所要時間を測ると、レイテンシの約 9 割を flush が占めていました。dm-snapshot は COW のマッピングを永続化するためにデバイスキャッシュの flush を発行します。回数はメタデータ更新のタイミングに依存し、COW 1 サイクルあたり最大 2 回です。このマシンのコンシューマ NVMe では、その 1 回に約 0.9ms かかっていました。write そのものは十分速く、少なくともあの trace では、時間のほとんどを flush が占めていたことになります。</p>
+
+<p>flush のコストを下げるために作られたハードウェアがあります。<strong>電源断保護(PLP)</strong>付きのエンタープライズ SSD です。PLP は、電源が落ちても揮発キャッシュの内容が NAND に書き切られることをコンデンサで保証する仕組みで、この保証を持つドライブは flush を受け取っても実際にはほとんど何もする必要がありません。そこでオークションで中古の Intel DC S3710 を入手しました。2015 年発売の 400&nbsp;GB SATA、MLC のデータセンター向けドライブです。10 年前の製品ですが、手元の NVMe にはない PLP を備えています。</p>
+
+<p>数字を見せる前に、条件について断っておくことがあります。実験機の mini PC には SATA スロットの空きがなく、S3710 は JMicron の USB ブリッジ経由でつなぐしかありませんでした。比較相手の FORESEE 512&nbsp;GB NVMe(ルートファイルシステムと同居)は PCIe 直結です。つまり接続条件は対等ではなく、このマシンでは対等にできません。S3710 側の数字には、コマンド 1 回あたり数十 µs の USB オーバーヘッドが常に乗っています。分離したい変数は PLP の有無であって、SATA と NVMe の差でも新旧の差でもありません。ところが接続の非対称は、まさにその分離を PLP 側に不利な形で汚します。だからこの記事にできるのは公平な比較ではなく、ハンデ込みでも PLP の強みが観測できるかを確かめることまでです。結果から言えば観測できました。それも、予想よりずっと大きな差でした。以下、同一のファイル+loop 構成に対する fio の結果、sync なしで NVMe が速い理由の分解、並列度 1〜128 のスイープ、そして直列化がどの層で起きているかの <code>/proc/diskstats</code> による確認、の順に記録します。</p>
+
+<h2>実験装置</h2>
+
+<p>測定は 2 台とも、同じファイル+loop の層を通して行います。各ドライブ自身の ext4 に置いた 10G のファイルを、loop デバイスとしてアタッチする構成です。一つには制約への正直さとして(NVMe はルートファイルシステムを載せているので、生デバイスでは測れません)、もう一つは実験の作法として。ファイルと loop の層で生じるオーバーヘッドが何であれ、2 台が同じだけ払うことになるからです:</p>
+
+<pre><code># one 10G backing file on each drive's own ext4, fully pre-written
+dd if=/dev/zero of=$FILE bs=1M count=10240 oflag=direct conv=fsync
+
+# loop devices with direct-io, so the host page cache never absorbs a write
+losetup --find --show --direct-io=on $FILE
+
+# fio talks to the loop devices directly, e.g.:
+fio --filename=/dev/loopN --rw=randwrite --bs=4k --direct=1 \
+    --ioengine=psync --fdatasync=1 --time_based --runtime=30</code></pre>
+
+<p>測定は fio 3.36 で、断りがない限りすべて 4k ランダム書き込みの <code>direct=1</code> です。sync 付き書き込みが通る経路を並べておくと、fio が loop デバイスに <code>fdatasync</code> → loop が backing ファイルに <code>fdatasync</code> → ext4 のジャーナルコミット → <strong>物理ドライブへの FLUSH コマンド</strong>、となります。測りたいのはこの最後の区間です。</p>
+
+<table>
+<tr><th></th><th>PLP ドライブ</th><th>非 PLP ドライブ</th></tr>
+<tr><td>モデル</td><td>Intel DC S3710 400GB (SSDSC2BA400G4)</td><td>FORESEE 512GB (MAXIO コントローラ)</td></tr>
+<tr><td>世代 / クラス</td><td>2015 年、SATA データセンター、MLC</td><td>現代のコンシューマ NVMe 1.4</td></tr>
+<tr><td>接続</td><td>USB 3.1 Gen2 ブリッジ (JMicron JMS580, UAS)</td><td>PCIe(ルート FS と同居)</td></tr>
+<tr><td>電源断保護</td><td><strong>あり(コンデンサ付きキャッシュ)</strong></td><td>なし</td></tr>
+<tr><td>揮発ライトキャッシュ</td><td>on</td><td>on</td></tr>
+</table>
+
+<h2>キュー深度 1 での測定</h2>
+
+<p>ワークロードは 3 種類です。素の O_DIRECT 書き込み、write のたびに <code>fdatasync</code> を発行するもの(<code>fdatasync=1</code>)、O_SYNC 書き込み(<code>sync=1</code>)。いずれも 1 ジョブ、キュー深度 1、30 秒です。</p>
+
+<table>
+<tr><th>host-side (4k randwrite, qd1)</th><th class="num">PLP: S3710 (USB)</th><th class="num">非PLP: FORESEE NVMe</th><th>勝者</th></tr>
+<tr><td>sync なし</td><td class="num">7,661 IOPS / 130µs</td><td class="num"><strong>29,796 IOPS / 33µs</strong></td><td>非PLP、3.9 倍</td></tr>
+<tr><td>fdatasync=1 (write 毎に fdatasync)</td><td class="num"><strong>1,888 IOPS</strong> / fsync 392µs</td><td class="num">858 IOPS / fsync 1,110µs</td><td>PLP、2.2 倍</td></tr>
+<tr><td>sync=1 (O_SYNC)</td><td class="num"><strong>1,219 IOPS</strong> / 819µs</td><td class="num">579 IOPS / 1,725µs</td><td>PLP、2.1 倍</td></tr>
+</table>
+
+<p>sync なしでは、新しいドライブが期待どおりに勝ちます。ところが write 1 回ごとに <code>fdatasync</code> をはさむと、USB 接続の 10 年前のドライブのほうが 2.2 倍速くなりました。flush 1 回の所要時間は、S3710 が 392µs、NVMe が 1.1ms です。揮発ライトキャッシュはどちらも有効なので、差が出るとすれば FLUSH コマンドを受けたときの振る舞いです。S3710 のキャッシュはコンデンサで保護されているため、flush にはほとんど何もせずに応答できます。一方のコンシューマドライブは、flush のたびに実際にキャッシュを NAND へ書き出す必要があります。</p>
+
+<h2>sync なしで NVMe が速い理由</h2>
+
+<p>先に、sync なしの 3.9 倍差のほうを説明しておきます。これは SATA と NVMe というインターフェースの差なのでしょうか。手がかりとして同条件の 4k ランダム読み込みを測ると、S3710 側 180µs、NVMe 側 58µs と、書き込みと同じ形の差が出ます。</p>
+
+<p>sync なしの write は両ドライブとも揮発キャッシュに載った時点で応答が返るため、NAND の書き込み速度はこの差に関係しません。残るのはコマンドが往復する経路そのもので、約 100µs の差は実測とスペックである程度まで割れます。まず loop 層のコストは実測できます。NVMe 側でファイルを直接叩くと 24µs、loop 越しでは 33µs なので、loop の取り分は約 9µs、NVMe デバイスと ext4 の応答は約 24µs です。次に S3710 のスペック上の典型 write レイテンシは <a href="https://lenovopress.lenovo.com/lp0055.pdf">66µs</a> で、これはネイティブ SATA での値です。つまり USB を挟む前に、コントローラの世代差だけで 40µs 強の差が出る計算になります。実測の 130µs から loop の 9µs とスペックの 66µs を引いた残り約 55µs が、USB ブリッジと SCSI から SATA への変換に載っている分です。この残差のうちどこまでがブリッジでどこからが SATA/AHCI 自体なのかは、ネイティブポートで測らない限り分離できません。「NVMe だから速い」というより、「PCIe 直結の現代のコントローラが、USB 越しの 10 年前のコントローラより速い」というのが実態でした。</p>
+
+<p>キュー深度 1 では IOPS がレイテンシの逆数そのものになるので、この µs 単位の差がそのまま数字に表れます。では、差が固定の往復時間なのだとすれば、並列にすれば埋まるのでしょうか。</p>
+
+<h2>並列度 1〜128 のスイープ</h2>
+
+<p>ドライブごとに 2 種類のスイープを回します。sync なしの並列度は、<code>io_uring</code> の iodepth、つまり非同期に積むキューの深さで作ります。sync ありの並列度はプロセス数で作るしかありません。<code>fdatasync</code> は同期システムコールなので、flush を N 個同時に発行するには N 個のライターが必要だからです(<code>psync</code>, numjobs=N, <code>fdatasync=1</code>)。データベースのコミットが並列化しにくいのも、これと同じ理由です。</p>
+
+<div class="fig" style="background: var(--bg2); border: 1px solid #222; border-radius: 6px; padding: 16px;">
+<div class="chart-legend">
+  <span class="key"><span class="stroke" style="border-color: var(--accent)"></span>PLP — Intel S3710 (SATA via USB)</span>
+  <span class="key"><span class="stroke" style="border-color: var(--orange)"></span>no PLP — FORESEE NVMe</span>
+</div>
+<div class="panels">
+  <div class="panel" id="p-nosync"><h4>no sync (io_uring, iodepth=N)</h4></div>
+  <div class="panel" id="p-sync"><h4>fdatasync per write (numjobs=N)</h4></div>
+</div>
+<div class="figcap">4k randwrite IOPS vs 並列度、両対数、y 軸共通。ホバーで値を表示。左: NVMe が全域で上。右: 全点で順位が逆転し、N=8 で差は 13 倍。</div>
+</div>
+
+<table>
+<tr><th class="num">N</th><th class="num">PLP, sync なし</th><th class="num">非PLP, sync なし</th><th class="num">PLP, fdatasync</th><th class="num">非PLP, fdatasync</th></tr>
+<tr><td class="num">1</td><td class="num">6,067</td><td class="num">29,156</td><td class="num">1,789</td><td class="num">781</td></tr>
+<tr><td class="num">2</td><td class="num">12,290</td><td class="num">39,931</td><td class="num">2,612</td><td class="num">181</td></tr>
+<tr><td class="num">4</td><td class="num">34,497</td><td class="num">60,844</td><td class="num">5,499</td><td class="num">417</td></tr>
+<tr><td class="num">8</td><td class="num">44,646</td><td class="num">79,716</td><td class="num">9,786</td><td class="num">754</td></tr>
+<tr><td class="num">16</td><td class="num">44,533</td><td class="num">79,850</td><td class="num">15,327</td><td class="num">2,114</td></tr>
+<tr><td class="num">32</td><td class="num">45,258</td><td class="num">85,617</td><td class="num">20,877</td><td class="num">4,315</td></tr>
+<tr><td class="num">64</td><td class="num">44,749</td><td class="num">96,934</td><td class="num">29,063</td><td class="num">7,937</td></tr>
+<tr><td class="num">128</td><td class="num">44,753</td><td class="num">93,351</td><td class="num">29,307</td><td class="num">10,199</td></tr>
+</table>
+
+<p>固定レイテンシの差は、並列度である程度まで薄まります。左のパネルでは、S3710 が 6k から 45k までスケールして頭打ちになり(上限はおそらく USB/UAS のキュー深度 30)、NVMe は 9.3 万まで伸びます。比率は 3.9 倍から 2.1 倍まで縮みますが、なくなりはしません。また、シーケンシャル 1M 転送では差がむしろ 5 倍に開きます(435 MiB/s に対し 2,250&nbsp;MiB/s)。コマンド往復の時間が薄まった先ではリンク帯域が効いてきて、SATA の 6&nbsp;Gb/s が超えられない上限になるからです。</p>
+
+<p>本題は右のパネルです。write ごとに flush を打つ条件では、S3710 は N=64 で 29k IOPS までほぼ線形にスケールします。flush が軽いので、並列ライターの処理がきれいに重なるためです。NVMe は N=8 まで 1,000 IOPS 未満にとどまり、複数ライターの flush をカーネルがまとめられるようになって、ようやく伸び始めます(この仕組みは後述します)。それでも N=128 で 10k、PLP ドライブの 3 分の 1 です。</p>
+
+<div class="callout warn"><strong>副産物の発見: ばらつき。</strong>NVMe の sync 性能は、低いだけでなく不安定です。N=2 の点を 3 回測り直すと 194、567、949 IOPS と 5 倍の幅が出ました。flush の所要時間は「その瞬間にキャッシュを書き出すコスト」なので、SLC キャッシュや GC の内部状態がそのまま結果に表れるのだと考えられます。同じ測り直しを S3710 で行うと 2,766 / 2,777 / 2,788 で、幅は ±0.4% に収まります。ただし、この安定性を PLP 単体の効果と呼ぶのは言い過ぎです。ほぼ no-op になった flush はブレようがない、という意味では PLP の帰結ですが、NVMe 側のブレを生んでいる SLC キャッシュや GC はコンシューマ設計の性質であり、S3710 はそもそもレイテンシの一貫性を狙って設計されたエンタープライズドライブです。速さの差は PLP に、ブレの差は PLP を含むエンタープライズとコンシューマの設計差全体に帰すのが公平でしょう。レイテンシの SLO を守る用途では、このブレの差がむしろ効くかもしれません。</div>
+
+<h2>loop デバイスが直列化しているのではないか</h2>
+
+<p>もっともな疑いです。どちらのドライブも loop デバイスと ext4 の下にあり、ext4 のジャーナル(jbd2)がコミットを直列化することはよく知られています。NVMe の頭打ちはスタックの制約であって、ドライブのせいではないのかもしれません。これには構成から言える反証と、実測による反証があります。</p>
+
+<p>構成から言える反証: スタックは両側で完全に同一で、その同じスタックを PLP 側は毎秒 29k の sync write が通過しています。loop や jbd2 の直列化が毎秒 800 の頭打ちの原因なら、両方のドライブが同じ場所で止まるはずです。</p>
+
+<p>実測による反証: kernel 5.5 以降の <code>/proc/diskstats</code> には、物理デバイスごとの FLUSH コマンド数と所要時間の累計が載っています(<code>flush_ios</code> と <code>flush_ticks</code>)。fio を動かしながらこれを差分すれば、実ドライブに届いた flush を数えられます:</p>
+
+<table>
+<tr><th>sync テスト実行中</th><th class="num">fio sync-write IOPS</th><th class="num">物理 FLUSH/s</th><th class="num">FLUSH 平均所要</th><th class="num">flush 実行中の割合</th></tr>
+<tr><td>sda (PLP)、1 並列</td><td class="num">1,892</td><td class="num">2,805</td><td class="num">0.16ms</td><td class="num">44%</td></tr>
+<tr><td>sda (PLP)、8 並列</td><td class="num">9,745</td><td class="num">3,384</td><td class="num"><strong>0.16ms</strong></td><td class="num">56%</td></tr>
+<tr><td>nvme0n1、1 並列</td><td class="num">880</td><td class="num">857</td><td class="num">0.77ms</td><td class="num">66%</td></tr>
+<tr><td>nvme0n1、8 並列</td><td class="num">4,117</td><td class="num">1,012</td><td class="num">0.70ms</td><td class="num"><strong>71%</strong></td></tr>
+</table>
+
+<p>直列化が起きている場所は、この表から読み取れます。8 並列のとき、NVMe は計測時間の 71% を FLUSH の実行に費やしています。1 回あたり 0.7ms で、内部状態によってはミリ秒台まで延びます。キャッシュ flush はデバイス全体に対する操作で、複数を同時には実行できません。並列ライターが待たされていた場所は loop ではなく、NVMe 自身の flush でした。S3710 の flush は負荷にかかわらず 0.16ms のまま変わりません。</p>
+
+<p>この表からは、スタックがむしろ両者を助けていることも読み取れます。fio が完了した sync write の数より、デバイスに届いた flush の数のほうが少ないのです(9,745 ops に対し 3,384 flush、4,117 に対し 1,012)。同時に発行された <code>fdatasync</code> を、jbd2 のグループコミットが 1 回のジャーナルコミットと 1 回の flush にまとめているためです。NVMe の曲線が高並列でようやく持ち上がるのはこのまとめ書きの効果で、データベースが頼っている group commit と同じ機構です。(なお、この測定で NVMe がスイープ時の 754 に対して 4,117 IOPS を出しているのは、たまたま flush の所要時間が短い 10 秒間に当たったためです。前述のばらつきの一例です。)</p>
+
+<p>もう一つの疑いは、この表でも完全には消せません。S3710 は USB ブリッジ越しで、FLUSH を転送せずに握り潰したり勝手に最適化したりするブリッジは、昔から実在が知られています。もしこの JMicron がそうなら、flush が安いのは PLP の効果ではなく、ブリッジがさぼった結果です。実測から言えるのは状況証拠までです。握り潰された flush はほぼ 0µs で完了するはずですが、実測は 0.16ms で USB の往復時間として妥当な値でした。負荷をかけても 0.16ms から動かず、掃き出すべきデータ量への依存も見えません。これは「flush は届いていて、PLP のおかげで安く済んでいる」という説明と整合しますが、「ブリッジが一定時間で ACK だけ返している」場合と外から区別はつきません。決着には、書き込み中に電源を抜いてデータ消失を確かめるテスト(diskchecker.pl の類)か、ネイティブ SATA での再測定が必要で、どちらも今回はできていません。この記事の結論は、S3710 が PLP の仕様どおりに振る舞っていることを前提にしています。その留保付きで読んでください。</p>
+
+<h2>PLP が何を変えるのか</h2>
+
+<p>電源断保護の実体はコンデンサです。電源が落ちても、ドライブは残った電力で揮発キャッシュの内容を NAND に書き切れます。性能への効き方は、この保証から直接導けます。キャッシュを失わないドライブにとって、キャッシュに載ったデータはすでに永続です。だから「キャッシュを永続化せよ」という意味しか持たない FLUSH コマンドは、届いた時点で完了しています。S3710 の応答時間は実質 USB の往復だけでした。FORESEE にはこの保証がないので、FLUSH のたびに dirty なデータの NAND への書き込みが走ります。ミリ秒単位で、直列で、内部状態に左右されながらです。</p>
+
+<p>この差が効くのは、書き込みの完了と耐久性の保証が結びついている処理です。データベースのコミットログ(キュー深度 1 の fsync ループは <code>pg_test_fsync</code> が測る形そのものです)、etcd や raft の WAL、ファイルシステムのジャーナル、メッセージキューの ack。「書き込みは保存された」と応答してから先へ進む処理はすべて該当します。逆に、PLP が効かない領域も測定に表れています。1M ブロックの書き込みに <code>fdatasync</code> を 1 回ずつ添える条件では NVMe が勝ちました(499 MiB/s に対し 351&nbsp;MiB/s)。1 MiB の転送時間に対して flush 1 回の重みは小さく、帯域の差が残るからです。大きな書き込みを流し続ける用途なら帯域を選ぶべきで、コミットを返す用途なら flush の単価がそのまま性能になります。今回のスタックでは、その単価の差が、USB ブリッジと SATA リンクと 10 年分のコントローラの進歩を合わせたハンデを上回った、というのが観測の中身です。</p>
+
+<p>誤解のないように書いておくと、この記事は「中古の SATA ドライブを USB でぶら下げろ」という勧めではありません。PLP は SATA 時代の遺物ではなく、現行のデータセンター向け NVMe や産業用 SSD には標準的に載っていて、新品で普通に買えます。今回オークションの S3710 を選んだのは、PLP の有無というひとつの変数を、失敗しても惜しくない値段で検証するためです。sync 書き込みが性能を決める用途での実用的な結論は「現行の PLP 付きドライブをネイティブ接続で使う」で、この記事の数字はその効果の下限を示していることになります。</p>
+
+<div class="callout"><strong>数字を引用するときの注意。</strong>NVMe はルートファイルシステムと同居しており、システムのバックグラウンド書き込みがデバイスを共有しています(ただし 10 秒の測定窓では flush 数がベンチマーク約 10⁴ に対しノイズ約 10² で、影響は小さいはずです)。loop の層は 1 操作あたり約 9µs(実測)を上乗せし、jbd2 のグループコミットは両方の sync 曲線に同じ形で効いています。絶対値はこのスタック固有のもので、持ち出せるのは 2 台の差のほうです。スイープの各点は 10 秒 1 回の測定で、ばらつきの小さい PLP 側には十分ですが、NVMe 側は揺れる値の 1 サンプルにすぎません。また S3710 の USB ブリッジはコマンドあたり約 50µs を上乗せしているので、ネイティブ SATA 接続で測り直せば、PLP 側の数字はここに載せたどれよりもよくなるはずです。</div>
+
+<p>このマシンでは閉じられなかった問いが一つ残っています。S3710 のレイテンシのうち、どこまでが USB ブリッジで、どこからが 2015 年のコントローラなのか。切り分けにはネイティブの SATA ポートが必要で、この実験機にはありません。ドライブを別のマシンに挿す機会があれば、キュー深度 1 の列を測り直すつもりです。</p>
+
+<p>生データ: <a href="data/host-results.json">head-to-head results</a>、<a href="data/sweep-summary.json">parallelism sweep</a>、<a href="data/flush-accounting.json">flush accounting</a>。</p>
+
+<footer>osjupiter · <a href="https://github.com/osjupiter">github.com/osjupiter</a></footer>
+</div>
+
+<script>
+(function () {
+  const NS = [1, 2, 4, 8, 16, 32, 64, 128];
+  const DATA = {
+    nosync: {
+      plp:  [6067, 12290, 34497, 44646, 44533, 45258, 44749, 44753],
+      nvme: [29156, 39931, 60844, 79716, 79850, 85617, 96934, 93351],
+    },
+    sync: {
+      plp:  [1789, 2612, 5499, 9786, 15327, 20877, 29063, 29307],
+      nvme: [781, 181, 417, 754, 2114, 4315, 7937, 10199],
+    },
+  };
+  const SERIES = [
+    { id: 'plp',  name: 'PLP (S3710)',    color: '#0af' },
+    { id: 'nvme', name: 'no PLP (NVMe)', color: '#f80' },
+  ];
+  const W = 440, H = 320, M = { t: 12, r: 66, b: 34, l: 48 };
+  const YMIN = 100, YMAX = 130000;
+  const x = i => M.l + i * (W - M.l - M.r) / (NS.length - 1);
+  const y = v => {
+    const t = (Math.log10(v) - Math.log10(YMIN)) / (Math.log10(YMAX) - Math.log10(YMIN));
+    return H - M.b - t * (H - M.t - M.b);
+  };
+  const fmt = v => v >= 1000 ? (v / 1000) + 'k' : String(v);
+  const fmtFull = v => v.toLocaleString('en-US');
+
+  function svgEl(tag, attrs) {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const k in attrs) el.setAttribute(k, attrs[k]);
+    return el;
+  }
+
+  function buildPanel(rootId, mode) {
+    const root = document.getElementById(rootId);
+    const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img',
+      'aria-label': (mode === 'sync' ? 'with fdatasync' : 'no sync') + ' IOPS vs parallelism' });
+    svg.style.background = 'transparent';
+    svg.style.border = 'none';
+    root.appendChild(svg);
+
+    [100, 1000, 10000, 100000].forEach(v => {
+      svg.appendChild(svgEl('line', { x1: M.l, x2: W - M.r, y1: y(v), y2: y(v),
+        stroke: '#2a2a2a', 'stroke-width': 1 }));
+      const t = svgEl('text', { x: M.l - 7, y: y(v) + 4, 'text-anchor': 'end',
+        'font-size': 11, fill: '#777' });
+      t.textContent = fmt(v);
+      svg.appendChild(t);
+    });
+    svg.appendChild(svgEl('line', { x1: M.l, x2: W - M.r, y1: H - M.b, y2: H - M.b,
+      stroke: '#3a3a3a', 'stroke-width': 1 }));
+    NS.forEach((n, i) => {
+      const t = svgEl('text', { x: x(i), y: H - M.b + 17, 'text-anchor': 'middle',
+        'font-size': 11, fill: '#777' });
+      t.textContent = n;
+      svg.appendChild(t);
+    });
+    const xc = svgEl('text', { x: (M.l + W - M.r) / 2, y: H - 3, 'text-anchor': 'middle',
+      'font-size': 11, fill: '#666' });
+    xc.textContent = 'parallelism N';
+    svg.appendChild(xc);
+    const yc = svgEl('text', { x: M.l - 7, y: M.t + 2, 'text-anchor': 'end',
+      'font-size': 11, fill: '#666' });
+    yc.textContent = 'IOPS';
+    svg.appendChild(yc);
+
+    SERIES.forEach(s => {
+      const vals = DATA[mode][s.id];
+      const d = vals.map((v, i) => `${i ? 'L' : 'M'}${x(i)},${y(v)}`).join('');
+      svg.appendChild(svgEl('path', { d, fill: 'none', stroke: s.color,
+        'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+      vals.forEach((v, i) => {
+        svg.appendChild(svgEl('circle', { cx: x(i), cy: y(v), r: 5.5, fill: '#151515' }));
+        svg.appendChild(svgEl('circle', { cx: x(i), cy: y(v), r: 4, fill: s.color }));
+      });
+      const last = vals[vals.length - 1];
+      svg.appendChild(svgEl('line', { x1: W - M.r + 2, x2: W - M.r + 6,
+        y1: y(last), y2: y(last), stroke: s.color, 'stroke-width': 2.5 }));
+      const lbl = svgEl('text', { x: W - M.r + 9, y: y(last) + 4, 'font-size': 11,
+        'font-weight': 600, fill: '#bbb' });
+      lbl.textContent = s.id === 'plp' ? 'PLP' : 'no PLP';
+      svg.appendChild(lbl);
+    });
+
+    const cross = svgEl('line', { y1: M.t, y2: H - M.b, stroke: '#444',
+      'stroke-width': 1, visibility: 'hidden' });
+    svg.appendChild(cross);
+    const tip = document.createElement('div');
+    tip.className = 'chart-tip';
+    root.appendChild(tip);
+
+    svg.addEventListener('pointermove', e => {
+      const r = svg.getBoundingClientRect();
+      const sx = (e.clientX - r.left) * W / r.width;
+      let best = 0, bd = Infinity;
+      NS.forEach((_, i) => { const d = Math.abs(sx - x(i)); if (d < bd) { bd = d; best = i; } });
+      cross.setAttribute('x1', x(best)); cross.setAttribute('x2', x(best));
+      cross.setAttribute('visibility', 'visible');
+      tip.replaceChildren();
+      const tn = document.createElement('div');
+      tn.className = 'tn';
+      tn.textContent = 'N = ' + NS[best];
+      tip.appendChild(tn);
+      SERIES.forEach(s => {
+        const row = document.createElement('div'); row.className = 'row';
+        const k = document.createElement('span'); k.className = 'stroke';
+        k.style.borderColor = s.color;
+        const v = document.createElement('b');
+        v.textContent = fmtFull(DATA[mode][s.id][best]);
+        const nm = document.createElement('span'); nm.className = 'name';
+        nm.textContent = s.name;
+        row.append(k, v, nm);
+        tip.appendChild(row);
+      });
+      tip.style.display = 'block';
+      const pr = root.getBoundingClientRect();
+      const px = e.clientX - pr.left;
+      tip.style.left = Math.min(px + 14, pr.width - tip.offsetWidth - 8) + 'px';
+      tip.style.top = '40px';
+    });
+    svg.addEventListener('pointerleave', () => {
+      tip.style.display = 'none';
+      cross.setAttribute('visibility', 'hidden');
+    });
+  }
+
+  buildPanel('p-nosync', 'nosync');
+  buildPanel('p-sync', 'sync');
+})();
+</script>
+</body>
+</html>

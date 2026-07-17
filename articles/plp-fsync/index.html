@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>What Power-Loss Protection Buys: fsync Benchmarks of a Used Enterprise SSD vs. a Consumer NVMe</title>
+<meta name="description" content="dm-snapshot's flush costs sent me to an auction for a used Intel DC S3710. The comparison is imperfect — no SATA slot left, so the S3710 sits behind a USB bridge — but with fdatasync on the write path the PLP drive still comes out ahead, and physical flush accounting shows why.">
+<link rel="canonical" href="https://osjupiter.github.io/blog/articles/plp-fsync/">
+<link rel="alternate" hreflang="en" href="https://osjupiter.github.io/blog/articles/plp-fsync/">
+<link rel="alternate" hreflang="ja" href="https://osjupiter.github.io/blog/articles/plp-fsync/index.ja.html">
+<link rel="alternate" hreflang="x-default" href="https://osjupiter.github.io/blog/articles/plp-fsync/">
+<meta property="og:site_name" content="osjupiter">
+<meta property="og:title" content="What Power-Loss Protection Buys: fsync Benchmarks of a Used Enterprise SSD vs. a Consumer NVMe">
+<meta property="og:description" content="dm-snapshot's flush costs sent me to an auction for a used Intel DC S3710. The comparison is imperfect — no SATA slot left, so the S3710 sits behind a USB bridge — but with fdatasync on the write path the PLP drive still comes out ahead, and physical flush accounting shows why.">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://osjupiter.github.io/blog/articles/plp-fsync/">
+<meta name="twitter:card" content="summary">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "What Power-Loss Protection Buys: fsync Benchmarks of a Used Enterprise SSD vs. a Consumer NVMe",
+  "description": "dm-snapshot's flush costs sent me to an auction for a used Intel DC S3710. The comparison is imperfect — no SATA slot left, so the S3710 sits behind a USB bridge — but with fdatasync on the write path the PLP drive still comes out ahead, and physical flush accounting shows why.",
+  "url": "https://osjupiter.github.io/blog/articles/plp-fsync/",
+  "datePublished": "2026-07-17",
+  "dateModified": "2026-07-17",
+  "author": {"@type": "Person", "name": "osjupiter", "url": "https://github.com/osjupiter"}
+}
+</script>
+<style>
+:root {
+  --bg: #0c0c0c;
+  --bg2: #151515;
+  --bg3: #1a1a1a;
+  --fg: #d4d4d4;
+  --fg2: #888;
+  --accent: #0af;
+  --orange: #f80;
+  --red: #f44;
+  --green: #0f6;
+  --purple: #c6f;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; line-height: 1.7; }
+.container { max-width: 860px; margin: 0 auto; padding: 40px 24px; }
+h1 { font-size: 2em; line-height: 1.3; margin-bottom: 8px; color: #fff; }
+.subtitle { color: var(--fg2); font-size: 1.05em; margin-bottom: 40px; }
+h2 { font-size: 1.4em; margin: 48px 0 16px; color: #eee; border-bottom: 1px solid #222; padding-bottom: 8px; }
+h3 { font-size: 1.15em; margin: 32px 0 12px; color: #ccc; }
+p { margin-bottom: 16px; color: var(--fg); }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { background: var(--bg3); padding: 2px 6px; border-radius: 3px; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.9em; color: #ddd; }
+pre { background: var(--bg2); padding: 16px; border-radius: 6px; overflow-x: auto; margin: 16px 0; border: 1px solid #222; }
+pre code { background: none; padding: 0; font-size: 0.85em; }
+.callout { background: var(--bg2); border-left: 3px solid var(--accent); padding: 16px 20px; margin: 20px 0; border-radius: 0 6px 6px 0; }
+.callout.warn { border-left-color: var(--orange); }
+.callout.danger { border-left-color: var(--red); }
+.callout.ok { border-left-color: var(--green); }
+.callout strong { color: #eee; }
+table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.9em; }
+th, td { padding: 8px 12px; border: 1px solid #222; text-align: left; }
+th { background: var(--bg2); color: #ccc; font-weight: 600; }
+td { color: var(--fg); }
+.num { text-align: right; font-family: 'JetBrains Mono', monospace; }
+footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: var(--fg2); font-size: 0.85em; text-align: center; }
+.lang-switch { display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 0.8em; color: #555; margin-bottom: 16px; }
+.lang-switch strong { color: #ccc; font-weight: 600; }
+.fig { margin: 24px 0; }
+.fig svg { width: 100%; height: auto; display: block; background: var(--bg2); border: 1px solid #222; border-radius: 6px; }
+.fig text { font-family: 'JetBrains Mono', 'Fira Code', monospace; }
+.figcap { font-size: 0.85em; color: var(--fg2); margin-top: 8px; text-align: center; }
+.panels { display: flex; gap: 12px; flex-wrap: wrap; }
+.panel { flex: 1 1 380px; min-width: 300px; position: relative; }
+.panel h4 { font-size: 0.9em; color: #ccc; margin: 0 0 6px; font-family: 'JetBrains Mono', monospace; font-weight: 600; }
+.chart-tip { position: absolute; pointer-events: none; background: var(--bg3); border: 1px solid #333;
+  border-radius: 6px; padding: 8px 10px; font-size: 0.75em; display: none; z-index: 3;
+  font-family: 'JetBrains Mono', monospace; box-shadow: 0 2px 10px rgba(0,0,0,.5); }
+.chart-tip .tn { color: var(--fg2); margin-bottom: 4px; }
+.chart-tip .row { display: flex; align-items: center; gap: 7px; margin-top: 2px; }
+.chart-tip .row .stroke { width: 12px; border-top: 2.5px solid; border-radius: 2px; }
+.chart-tip .row b { color: #fff; }
+.chart-tip .row span.name { color: var(--fg2); }
+.chart-legend { display: flex; gap: 20px; align-items: center; font-size: 0.8em; color: var(--fg2);
+  margin-bottom: 10px; font-family: 'JetBrains Mono', monospace; }
+.chart-legend .key { display: inline-flex; align-items: center; gap: 7px; }
+.chart-legend .stroke { width: 18px; height: 0; border-top: 2.5px solid; border-radius: 2px; }
+</style>
+</head>
+<body>
+<div class="container">
+<div class="lang-switch"><a href="../../">← index</a><span><strong>EN</strong> · <a href="index.ja.html">日本語</a></span></div>
+
+<h1>What Power-Loss Protection Buys: fsync Benchmarks of a Used Enterprise SSD vs. a Consumer NVMe</h1>
+<p class="subtitle">dm-snapshot's flush costs sent me to an auction for a used Intel DC S3710. The comparison is imperfect — no SATA slot left, so the S3710 sits behind a USB bridge — but with fdatasync on the write path the PLP drive still comes out ahead, and physical flush accounting shows why.</p>
+
+<p>This experiment owes its existence to a slowdown. While making the blktrace animations for <a href="../block-trace-viz/">an earlier article</a>, I watched dm-snapshot drag 4k random writes from 16,000 IOPS down to 430 the moment a snapshot existed. The per-step timing in that trace put roughly 90% of the latency on one thing: dm-snapshot persists its COW mappings with device cache flushes — up to two per COW cycle, depending on when the metadata needs updating — and on the consumer NVMe this machine uses, each one cost ~0.9ms. The writes were cheap. In that trace, the flushes were the workload.</p>
+
+<p>There is a class of hardware built to make exactly that cost disappear: enterprise SSDs with <strong>power-loss protection</strong> (PLP) — capacitors that guarantee the volatile cache reaches NAND if power dies, which lets the drive answer a flush without actually doing anything. So I went to an auction and got a used Intel DC S3710: 400&nbsp;GB, SATA, MLC, datacenter class, vintage 2015. Ten years old, but carrying the one spec-sheet line my NVMe lacks.</p>
+
+<p>One confession before any numbers. The mini PC running these experiments has no free SATA slot, so the S3710 hangs off a JMicron USB bridge, while the FORESEE 512&nbsp;GB NVMe — which also holds the root filesystem — sits on PCIe. This is not an identical-conditions comparison, and on this machine it cannot be one: every number the old drive posts carries a USB overhead of several tens of µs per command. The variable I want to isolate is the presence of PLP — not SATA versus NVMe, not 2015 versus now — and the asymmetric attachment contaminates exactly that isolation, in the PLP drive's disfavor. So the honest framing is a handicap match: can PLP's advantage still be observed through the handicap? It can: I gave both drives an identical file-backed stack, ran <code>fio</code> against it with and without sync, and watched the ranking invert. The rest of the article is the trail — the head-to-head numbers, the decomposition of why the NVMe wins the easy case, a 1→128 parallelism sweep, and physical flush accounting from <code>/proc/diskstats</code> to prove which layer serializes.</p>
+
+<h2>The rig</h2>
+
+<p>Both drives are measured through the same file-backed stack: a 10G file on each drive's own ext4, attached as a loop device. That is partly honesty about a constraint — the NVMe holds the root filesystem, so raw access is off the table — and partly experimental hygiene: whatever overhead the file and loop layers add, both drives pay it identically.</p>
+
+<pre><code># one 10G backing file on each drive's own ext4, fully pre-written
+dd if=/dev/zero of=$FILE bs=1M count=10240 oflag=direct conv=fsync
+
+# loop devices with direct-io, so the host page cache never absorbs a write
+losetup --find --show --direct-io=on $FILE
+
+# fio talks to the loop devices directly, e.g.:
+fio --filename=/dev/loopN --rw=randwrite --bs=4k --direct=1 \
+    --ioengine=psync --fdatasync=1 --time_based --runtime=30</code></pre>
+
+<p>All measurements use fio 3.36, and every test is 4k random writes with <code>direct=1</code> unless stated otherwise. The path a synced write travels: fio's <code>fdatasync</code> against the loop device → loop issues <code>fdatasync</code> on the backing file → ext4 journal commit → <strong>FLUSH command to the physical drive</strong>. That last hop is the one under test.</p>
+
+<table>
+<tr><th></th><th>PLP drive</th><th>non-PLP drive</th></tr>
+<tr><td>Model</td><td>Intel DC S3710 400GB (SSDSC2BA400G4)</td><td>FORESEE 512GB (MAXIO controller)</td></tr>
+<tr><td>Year / class</td><td>2015, SATA datacenter, MLC</td><td>modern consumer NVMe 1.4</td></tr>
+<tr><td>Attachment</td><td>USB 3.1 Gen2 bridge (JMicron JMS580, UAS)</td><td>PCIe (also hosts the root fs)</td></tr>
+<tr><td>Power-loss protection</td><td><strong>yes — capacitor-backed cache</strong></td><td>no</td></tr>
+<tr><td>Volatile write cache</td><td>on</td><td>on</td></tr>
+</table>
+
+<h2>Round one: queue depth 1</h2>
+
+<p>Three workloads, both disks: plain O_DIRECT writes, write-then-<code>fdatasync</code> (<code>fdatasync=1</code>), and O_SYNC writes (<code>sync=1</code>). Single job, queue depth 1, 30 seconds each.</p>
+
+<table>
+<tr><th>host-side (4k randwrite, qd1)</th><th class="num">PLP: S3710 (USB)</th><th class="num">no PLP: FORESEE NVMe</th><th>winner</th></tr>
+<tr><td>no sync</td><td class="num">7,661 IOPS / 130µs</td><td class="num"><strong>29,796 IOPS / 33µs</strong></td><td>no PLP, 3.9×</td></tr>
+<tr><td>fdatasync=1 (fdatasync per write)</td><td class="num"><strong>1,888 IOPS</strong> / fsync 392µs</td><td class="num">858 IOPS / fsync 1,110µs</td><td>PLP, 2.2×</td></tr>
+<tr><td>sync=1 (O_SYNC)</td><td class="num"><strong>1,219 IOPS</strong> / 819µs</td><td class="num">579 IOPS / 1,725µs</td><td>PLP, 2.1×</td></tr>
+</table>
+
+<p>Without sync the modern drive does exactly what its spec sheet promises. Add one <code>fdatasync</code> per write and the ten-year-old USB-attached drive is 2.2× faster — its flush costs 392µs end to end while the NVMe's costs 1.1ms. Both drives run their volatile write cache enabled; the difference is what a FLUSH command means to each. The S3710's cache is capacitor-backed, so acknowledging a flush costs almost nothing. The consumer drive has to actually drain its cache to NAND, every time.</p>
+
+<h2>Why does the NVMe win the easy case?</h2>
+
+<p>Before celebrating the old drive, I owed the 3.9× no-sync loss an explanation — is that the SATA-vs-NVMe protocol gap? Reads offer a second witness: 4k random reads at qd1 show the same shape of gap, 180µs against 58µs.</p>
+
+<p>An unsynced write is acknowledged from volatile cache on both drives, so NAND speed is not even in the path — the ~100µs gap is pure command-path latency. It splits further with one measurement and one datasheet. The loop layer is measurable: writing a file directly on the NVMe side costs 24µs against 33µs through the loop, so the loop adds ~9µs and the NVMe device plus ext4 answer in ~24µs. The S3710's datasheet puts its typical write latency at <a href="https://lenovopress.lenovo.com/lp0055.pdf">66µs</a> — a native-SATA figure — so drive generation alone accounts for 40µs-plus of the gap before the USB bridge enters. Subtracting the 9µs loop and the 66µs spec from the measured 130µs leaves ~55µs riding on the USB bridge and its SCSI→SATA translation; how that residual divides between the bridge and the SATA/AHCI protocol itself cannot be separated without a native port. "NVMe is faster than SATA" is the least of it; "a PCIe-native modern controller beats a USB-bridged 2015 controller" is most of it.</p>
+
+<p>At queue depth 1, IOPS is just 1/latency, so every one of those microseconds shows. Which raises the obvious next question: if the gap is a fixed per-command latency, does parallelism amortize it away?</p>
+
+<h2>1 to 128 writers</h2>
+
+<p>Two sweeps per drive. Without sync, parallelism means asynchronous queue depth (<code>io_uring</code>, iodepth=N). With sync it has to mean processes — <code>fdatasync</code> is a synchronous syscall, so the only way to have N flushes in flight is N writers (<code>psync</code>, numjobs=N, <code>fdatasync=1</code>). That distinction is the same one a database faces: you cannot "async away" a commit.</p>
+
+<div class="fig" style="background: var(--bg2); border: 1px solid #222; border-radius: 6px; padding: 16px;">
+<div class="chart-legend">
+  <span class="key"><span class="stroke" style="border-color: var(--accent)"></span>PLP — Intel S3710 (SATA via USB)</span>
+  <span class="key"><span class="stroke" style="border-color: var(--orange)"></span>no PLP — FORESEE NVMe</span>
+</div>
+<div class="panels">
+  <div class="panel" id="p-nosync"><h4>no sync (io_uring, iodepth=N)</h4></div>
+  <div class="panel" id="p-sync"><h4>fdatasync per write (numjobs=N)</h4></div>
+</div>
+<div class="figcap">4k randwrite IOPS vs. parallelism, log-log, shared y-axis. Hover for values. Left: the NVMe stays on top everywhere. Right: the ranking is inverted at every point; at N=8 the gap is 13×.</div>
+</div>
+
+<table>
+<tr><th class="num">N</th><th class="num">PLP, no sync</th><th class="num">no PLP, no sync</th><th class="num">PLP, fdatasync</th><th class="num">no PLP, fdatasync</th></tr>
+<tr><td class="num">1</td><td class="num">6,067</td><td class="num">29,156</td><td class="num">1,789</td><td class="num">781</td></tr>
+<tr><td class="num">2</td><td class="num">12,290</td><td class="num">39,931</td><td class="num">2,612</td><td class="num">181</td></tr>
+<tr><td class="num">4</td><td class="num">34,497</td><td class="num">60,844</td><td class="num">5,499</td><td class="num">417</td></tr>
+<tr><td class="num">8</td><td class="num">44,646</td><td class="num">79,716</td><td class="num">9,786</td><td class="num">754</td></tr>
+<tr><td class="num">16</td><td class="num">44,533</td><td class="num">79,850</td><td class="num">15,327</td><td class="num">2,114</td></tr>
+<tr><td class="num">32</td><td class="num">45,258</td><td class="num">85,617</td><td class="num">20,877</td><td class="num">4,315</td></tr>
+<tr><td class="num">64</td><td class="num">44,749</td><td class="num">96,934</td><td class="num">29,063</td><td class="num">7,937</td></tr>
+<tr><td class="num">128</td><td class="num">44,753</td><td class="num">93,351</td><td class="num">29,307</td><td class="num">10,199</td></tr>
+</table>
+
+<p>Parallelism does amortize the fixed latency — on the left panel the S3710 scales 6k→45k and plateaus (the USB/UAS queue depth of 30 is the likely ceiling), the NVMe scales to ~93k, and the ratio narrows from 3.9× to 2.1×. But it never closes, and sequential 1M transfers make it <em>worse</em> (435 vs 2,250&nbsp;MiB/s): once per-command latency is amortized, the bottleneck moves to link bandwidth, and SATA's 6&nbsp;Gb/s is a hard wall while PCIe keeps going.</p>
+
+<p>The right panel is the article. With a flush after every write, the S3710 scales almost linearly to 29k IOPS at N=64 — parallel writers pipeline cleanly because each flush is nearly free. The NVMe crawls under 1,000 IOPS until N=8, and only starts climbing when enough writers pile up that the kernel can merge their flushes (more on that mechanism below). At N=128 it has clawed back to 10k — still a third of the PLP drive, on a device that is 2× faster at everything else.</p>
+
+<div class="callout warn"><strong>The instability bonus.</strong> The NVMe's sync numbers are not just low, they are erratic: re-running the N=2 point three times gave 194, 567, and 949 IOPS — a 5× spread, presumably tracking SLC-cache and garbage-collection state, since a flush costs whatever "drain the cache now" costs at that moment. The S3710 under the same re-runs: 2,766 / 2,777 / 2,788 — a ±0.4% band. Attributing that stability to PLP alone would overreach, though. A near-no-op flush cannot vary much, so in that sense it follows from PLP — but the variance on the NVMe side comes from SLC caching and garbage collection, which are consumer-design traits, and the S3710 is an enterprise drive engineered for latency consistency well beyond its capacitors. The speed gap belongs to PLP; the consistency gap belongs to the enterprise-versus-consumer design difference as a whole, of which PLP is one part. For a latency SLO, that consistency may matter even more than the speed.</div>
+
+<h2>"Isn't the loop device just serializing your flushes?"</h2>
+
+<p>A fair objection: both drives sit under loop devices and ext4, and the jbd2 journal famously serializes commits. Maybe the NVMe's flatline is the stack's fault, not the drive's. Two answers, one logical and one measured.</p>
+
+<p>The logical one: the stack is byte-for-byte identical on both sides, and the PLP side pushes 29k sync writes per second through it. If loop+jbd2 serialization capped throughput at ~800 IOPS, it would cap both drives.</p>
+
+<p>The measured one: since kernel 5.5, <code>/proc/diskstats</code> counts FLUSH commands and their ticks per physical device (fields <code>flush_ios</code>/<code>flush_ticks</code>), so you can watch flushes arrive at the actual drive while fio runs upstream:</p>
+
+<table>
+<tr><th>during sync test</th><th class="num">fio sync-write IOPS</th><th class="num">physical FLUSH/s</th><th class="num">avg FLUSH time</th><th class="num">drive busy flushing</th></tr>
+<tr><td>sda (PLP), 1 writer</td><td class="num">1,892</td><td class="num">2,805</td><td class="num">0.16ms</td><td class="num">44%</td></tr>
+<tr><td>sda (PLP), 8 writers</td><td class="num">9,745</td><td class="num">3,384</td><td class="num"><strong>0.16ms</strong></td><td class="num">56%</td></tr>
+<tr><td>nvme0n1, 1 writer</td><td class="num">880</td><td class="num">857</td><td class="num">0.77ms</td><td class="num">66%</td></tr>
+<tr><td>nvme0n1, 8 writers</td><td class="num">4,117</td><td class="num">1,012</td><td class="num">0.70ms</td><td class="num"><strong>71%</strong></td></tr>
+</table>
+
+<p>The serialization point is visible and it is not the loop: at 8 writers the NVMe spends 71% of wall-clock time executing FLUSH commands, each taking ~0.7ms (and multiple milliseconds on bad days). A cache flush is inherently a device-wide, serialized operation — <em>that</em> is what parallel writers queue behind. The S3710's flushes take 0.16ms flat, independent of load.</p>
+
+<p>The table also shows the stack actively helping both drives rather than hurting them: fio completes more sync writes than the device receives flushes (9,745 ops on 3,384 flushes; 4,117 on 1,012), because jbd2 group commit merges concurrent <code>fdatasync</code>s into one journal commit and one flush. That merging is exactly why the NVMe's curve finally lifts at high N — and it is the same group-commit machinery a real database relies on. (It is also why this NVMe run shows 4,117 IOPS where the sweep recorded 754: the drive's flush cost had a good ten seconds. See the instability callout above.)</p>
+
+<p>One suspicion the table cannot fully retire. The S3710 hangs off a USB bridge, and bridges that drop or "optimize" FLUSH instead of forwarding it are a real, long-documented phenomenon — if this JMicron does that, the cheap flushes would be the bridge slacking, not PLP working. The measurements are only circumstantial evidence against it: a swallowed flush should complete in ~0µs, while the observed 0.16ms matches a USB round trip, and it stays at 0.16ms under load, with no dependence on how much dirty data there is to drain. That is consistent with "the flush reaches a drive that can answer it cheaply" — but it is not distinguishable, from the outside, from a bridge that acknowledges after a fixed delay. Settling it would take a pull-the-plug data-loss test (in the spirit of diskchecker.pl) or a native SATA re-run, and I have done neither here. The conclusion stands on the S3710 behaving as its PLP spec says it should; treat it with that reservation.</p>
+
+<h2>What PLP actually buys</h2>
+
+<p>Power-loss protection is a bank of capacitors that guarantees the drive's volatile cache reaches NAND if power dies. The performance consequence follows directly from the guarantee: a drive that cannot lose its cache is allowed to treat cache-resident data as durable — so a FLUSH command, whose entire meaning is "make the cache durable, now", is already satisfied when it arrives. The S3710 answers in a USB round trip. The FORESEE has no such guarantee, so each FLUSH forces NAND programming of whatever is dirty: milliseconds, serialized, at the mercy of the drive's internal state.</p>
+
+<p>Where does that bite? Everywhere durability is on the write path: database commit logs (a qd1 fsync loop is precisely <code>pg_test_fsync</code>'s shape), etcd/raft WALs, filesystem journals, message-queue acks, anything that promises "this write survived" before answering the network. The exception the data grants is honest, too: for sequential bulk writes with an occasional flush — 1M blocks with <code>fdatasync</code> each — the NVMe still wins (499 vs 351&nbsp;MiB/s), because one flush amortized over a megabyte is noise and bandwidth decides. If your workload is streaming backups, buy bandwidth. If it answers "committed" to anyone, per-flush cost <em>is</em> the workload — and under this stack, that cost difference was large enough to outweigh a USB bridge, a SATA link, and ten years of controller progress combined.</p>
+
+<p>To be clear about what this is not: a recommendation to hang used SATA drives off USB bridges. PLP is not a relic of the SATA era — current datacenter NVMe and industrial SSDs ship with it as a standard feature, buyable new, with none of this experiment's handicaps. The auctioned S3710 was the cheapest way to isolate one variable, the presence of PLP, on hardware I could afford to be wrong about. If sync writes decide your performance, the practical takeaway is to put a current PLP drive on a native interface; the numbers here are a lower bound on what that buys.</p>
+
+<div class="callout"><strong>Caveats, so the numbers travel well.</strong> The NVMe also hosts the root filesystem — background system writes share the device, though the 10-second windows were dominated by the benchmark (~10⁴ flushes vs ~10² of noise). The loop layer adds ~9µs per op (measured) and jbd2 group commit shapes both sync curves equally; absolute numbers are stack-specific, the asymmetry is the drives'. The sweep points are single 10s runs — fine for the PLP side (±0.4%), a snapshot of a moving target for the NVMe (see instability). And the S3710's USB bridge inflates its per-command latency by roughly 50µs, meaning a natively-attached S3710 would look <em>better</em> than every PLP number here.</div>
+
+<p>The open question I could not close on this machine: how much of the S3710's remaining latency is the USB bridge versus the 2015 controller. That needs a native SATA port, and this box has none free — if I ever move the drive, the qd1 columns get a follow-up.</p>
+
+<p>Raw data: <a href="data/host-results.json">head-to-head results</a>, <a href="data/sweep-summary.json">parallelism sweep</a>, <a href="data/flush-accounting.json">flush accounting</a>.</p>
+
+<footer>osjupiter · <a href="https://github.com/osjupiter">github.com/osjupiter</a></footer>
+</div>
+
+<script>
+(function () {
+  const NS = [1, 2, 4, 8, 16, 32, 64, 128];
+  const DATA = {
+    nosync: {
+      plp:  [6067, 12290, 34497, 44646, 44533, 45258, 44749, 44753],
+      nvme: [29156, 39931, 60844, 79716, 79850, 85617, 96934, 93351],
+    },
+    sync: {
+      plp:  [1789, 2612, 5499, 9786, 15327, 20877, 29063, 29307],
+      nvme: [781, 181, 417, 754, 2114, 4315, 7937, 10199],
+    },
+  };
+  const SERIES = [
+    { id: 'plp',  name: 'PLP (S3710)',    color: '#0af' },
+    { id: 'nvme', name: 'no PLP (NVMe)', color: '#f80' },
+  ];
+  const W = 440, H = 320, M = { t: 12, r: 66, b: 34, l: 48 };
+  const YMIN = 100, YMAX = 130000;
+  const x = i => M.l + i * (W - M.l - M.r) / (NS.length - 1);
+  const y = v => {
+    const t = (Math.log10(v) - Math.log10(YMIN)) / (Math.log10(YMAX) - Math.log10(YMIN));
+    return H - M.b - t * (H - M.t - M.b);
+  };
+  const fmt = v => v >= 1000 ? (v / 1000) + 'k' : String(v);
+  const fmtFull = v => v.toLocaleString('en-US');
+
+  function svgEl(tag, attrs) {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const k in attrs) el.setAttribute(k, attrs[k]);
+    return el;
+  }
+
+  function buildPanel(rootId, mode) {
+    const root = document.getElementById(rootId);
+    const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img',
+      'aria-label': (mode === 'sync' ? 'with fdatasync' : 'no sync') + ' IOPS vs parallelism' });
+    svg.style.background = 'transparent';
+    svg.style.border = 'none';
+    root.appendChild(svg);
+
+    [100, 1000, 10000, 100000].forEach(v => {
+      svg.appendChild(svgEl('line', { x1: M.l, x2: W - M.r, y1: y(v), y2: y(v),
+        stroke: '#2a2a2a', 'stroke-width': 1 }));
+      const t = svgEl('text', { x: M.l - 7, y: y(v) + 4, 'text-anchor': 'end',
+        'font-size': 11, fill: '#777' });
+      t.textContent = fmt(v);
+      svg.appendChild(t);
+    });
+    svg.appendChild(svgEl('line', { x1: M.l, x2: W - M.r, y1: H - M.b, y2: H - M.b,
+      stroke: '#3a3a3a', 'stroke-width': 1 }));
+    NS.forEach((n, i) => {
+      const t = svgEl('text', { x: x(i), y: H - M.b + 17, 'text-anchor': 'middle',
+        'font-size': 11, fill: '#777' });
+      t.textContent = n;
+      svg.appendChild(t);
+    });
+    const xc = svgEl('text', { x: (M.l + W - M.r) / 2, y: H - 3, 'text-anchor': 'middle',
+      'font-size': 11, fill: '#666' });
+    xc.textContent = 'parallelism N';
+    svg.appendChild(xc);
+    const yc = svgEl('text', { x: M.l - 7, y: M.t + 2, 'text-anchor': 'end',
+      'font-size': 11, fill: '#666' });
+    yc.textContent = 'IOPS';
+    svg.appendChild(yc);
+
+    SERIES.forEach(s => {
+      const vals = DATA[mode][s.id];
+      const d = vals.map((v, i) => `${i ? 'L' : 'M'}${x(i)},${y(v)}`).join('');
+      svg.appendChild(svgEl('path', { d, fill: 'none', stroke: s.color,
+        'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+      vals.forEach((v, i) => {
+        svg.appendChild(svgEl('circle', { cx: x(i), cy: y(v), r: 5.5, fill: '#151515' }));
+        svg.appendChild(svgEl('circle', { cx: x(i), cy: y(v), r: 4, fill: s.color }));
+      });
+      const last = vals[vals.length - 1];
+      svg.appendChild(svgEl('line', { x1: W - M.r + 2, x2: W - M.r + 6,
+        y1: y(last), y2: y(last), stroke: s.color, 'stroke-width': 2.5 }));
+      const lbl = svgEl('text', { x: W - M.r + 9, y: y(last) + 4, 'font-size': 11,
+        'font-weight': 600, fill: '#bbb' });
+      lbl.textContent = s.id === 'plp' ? 'PLP' : 'no PLP';
+      svg.appendChild(lbl);
+    });
+
+    const cross = svgEl('line', { y1: M.t, y2: H - M.b, stroke: '#444',
+      'stroke-width': 1, visibility: 'hidden' });
+    svg.appendChild(cross);
+    const tip = document.createElement('div');
+    tip.className = 'chart-tip';
+    root.appendChild(tip);
+
+    svg.addEventListener('pointermove', e => {
+      const r = svg.getBoundingClientRect();
+      const sx = (e.clientX - r.left) * W / r.width;
+      let best = 0, bd = Infinity;
+      NS.forEach((_, i) => { const d = Math.abs(sx - x(i)); if (d < bd) { bd = d; best = i; } });
+      cross.setAttribute('x1', x(best)); cross.setAttribute('x2', x(best));
+      cross.setAttribute('visibility', 'visible');
+      tip.replaceChildren();
+      const tn = document.createElement('div');
+      tn.className = 'tn';
+      tn.textContent = 'N = ' + NS[best];
+      tip.appendChild(tn);
+      SERIES.forEach(s => {
+        const row = document.createElement('div'); row.className = 'row';
+        const k = document.createElement('span'); k.className = 'stroke';
+        k.style.borderColor = s.color;
+        const v = document.createElement('b');
+        v.textContent = fmtFull(DATA[mode][s.id][best]);
+        const nm = document.createElement('span'); nm.className = 'name';
+        nm.textContent = s.name;
+        row.append(k, v, nm);
+        tip.appendChild(row);
+      });
+      tip.style.display = 'block';
+      const pr = root.getBoundingClientRect();
+      const px = e.clientX - pr.left;
+      tip.style.left = Math.min(px + 14, pr.width - tip.offsetWidth - 8) + 'px';
+      tip.style.top = '40px';
+    });
+    svg.addEventListener('pointerleave', () => {
+      tip.style.display = 'none';
+      cross.setAttribute('visibility', 'hidden');
+    });
+  }
+
+  buildPanel('p-nosync', 'nosync');
+  buildPanel('p-sync', 'sync');
+})();
+</script>
+</body>
+</html>

@@ -9,6 +9,7 @@ if present. Dates come from git history (first/last commit touching the dir).
 import html
 import re
 import subprocess
+from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -43,13 +44,15 @@ def git_dates(path: Path) -> tuple[str, str]:
     for line in git("log", "--format=%as %P", "--", rel):
         if not line.strip():
             continue
-        date, *parents = line.split()
+        day, *parents = line.split()
         if len(parents) < 2:
-            dates.append(date)
+            dates.append(day)
         else:  # subtree merge: use the imported branch's own dates instead
             dates += [d for d in git("log", "--format=%as", parents[1]) if d]
     if not dates:
-        return "", ""
+        # not committed yet: treat as published today so previews sort it first
+        today = date.today().isoformat()
+        return today, today
     return min(dates), max(dates)
 
 

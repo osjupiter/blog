@@ -1,0 +1,9 @@
+{
+  "note": "physical FLUSH commands counted via /proc/diskstats flush_ios/flush_ticks (kernel >= 5.5) during 10s host-side fio runs on the loop devices (psync, fdatasync=1, 4k randwrite)",
+  "rows": [
+    {"device": "sda (PLP)",   "numjobs": 1, "fio_sync_write_iops": 1892, "device_flush_per_s": 2805, "avg_flush_ms": 0.16, "flush_busy_pct": 43.7},
+    {"device": "nvme0n1",     "numjobs": 1, "fio_sync_write_iops": 880,  "device_flush_per_s": 857,  "avg_flush_ms": 0.77, "flush_busy_pct": 65.8},
+    {"device": "sda (PLP)",   "numjobs": 8, "fio_sync_write_iops": 9745, "device_flush_per_s": 3384, "avg_flush_ms": 0.16, "flush_busy_pct": 55.6},
+    {"device": "nvme0n1",     "numjobs": 8, "fio_sync_write_iops": 4117, "device_flush_per_s": 1012, "avg_flush_ms": 0.70, "flush_busy_pct": 70.6}
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "note": "host-side fio 3.36 directly on the loop devices (psync, numjobs=1, qd1, 4k random, direct=1, 30s for the sync rows; earlier 15s runs for nosync/randread)",
+  "plp": {
+    "nosync":     {"iops": 7661, "clat_avg_us": 130, "clat_p99_us": 165},
+    "fdatasync1": {"iops": 1888, "fsync_avg_us": 392},
+    "osync":      {"iops": 1219, "clat_avg_us": 819, "clat_p99_us": 995},
+    "randread":   {"iops": 5523, "clat_avg_us": 180, "clat_p99_us": 218}
+  },
+  "nvme": {
+    "nosync":     {"iops": 29796, "clat_avg_us": 33, "clat_p99_us": 47},
+    "nosync_file_direct_no_loop": {"iops": 40316, "clat_avg_us": 24.4},
+    "fdatasync1": {"iops": 858, "fsync_avg_us": 1110},
+    "osync":      {"iops": 579, "clat_avg_us": 1725, "clat_p99_us": 2073},
+    "randread":   {"iops": 16990, "clat_avg_us": 58, "clat_p99_us": 101}
+  }
+}
