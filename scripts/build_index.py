@@ -90,6 +90,15 @@ PAGE = """<!DOCTYPE html>
 <meta property="og:type" content="website">
 <meta property="og:url" content="{base_url}">
 <meta name="twitter:card" content="summary">
+<script type="application/ld+json">
+{{
+  "@context": "https://schema.org",
+  "@type": "WebSite",
+  "name": "osjupiter",
+  "alternateName": "{site_title}",
+  "url": "{base_url}"
+}}
+</script>
 <style>
 :root {{
   --bg: #0c0c0c;
