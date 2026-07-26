@@ -254,7 +254,7 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 </svg>
 </div>
 
-<p><strong>dm-snapshot (COW)</strong> must preserve the old data before overwriting it. For each write, it reads the old block, copies it to a COW area, flushes to ensure the copy is persisted, updates the mapping table, flushes again, and only then writes the new data. Two flushes per write, each ~1ms, making this a 6-step serial process.</p>
+<p><strong>dm-snapshot (COW)</strong> must preserve the old data before overwriting it. For each write, it reads the old block, copies it to a COW area, flushes to ensure the copy is persisted, updates the mapping table, flushes again, and only then writes the new data. Two flushes per write, each ~1ms, make this a 6-step serial process.</p>
 
 <p><strong>dm-thin (ROW)</strong> avoids all of this. Since it already uses indirect block mapping, a snapshot just freezes the current metadata pointers. New writes go to freshly allocated blocks with updated pointers &mdash; the old blocks remain untouched for the snapshot. No read of old data, no copy, no per-write flush. Metadata is committed in batches as before.</p>
 
@@ -271,7 +271,7 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 </table>
 
 <div class="callout danger">
-<strong>LVM snapshot COW is catastrophically slow for random writes.</strong> Each 4KB write becomes a 6-step sequence: Read old block &rarr; Write to COW area &rarr; <strong>Flush</strong> &rarr; Write COW mapping table &rarr; <strong>Flush</strong> &rarr; Write new data. The two flushes (write barriers) ensure that the COW mapping is persisted before the original block is overwritten &mdash; without them, a crash could corrupt the snapshot. Measuring the actual timing of each step: R ~0.06ms, W ~0.08ms, <strong>Flush ~0.9ms &times; 2 = 1.8ms</strong>, total ~2ms per write. The flushes alone account for 90% of the latency, producing the 37x slowdown from ~16k IOPS down to ~430. The green dots (reads) are the COW source reads.
+<strong>LVM snapshot COW is catastrophically slow for random writes.</strong> Each 4KB write becomes a 6-step sequence: Read old block &rarr; Write to COW area &rarr; <strong>Flush</strong> &rarr; Write COW mapping table &rarr; <strong>Flush</strong> &rarr; Write new data. The two flushes (write barriers) ensure that the COW mapping is persisted before the original block is overwritten &mdash; without them, a crash could corrupt the snapshot. Measured per step: R ~0.06ms, W ~0.08ms, <strong>Flush ~0.9ms &times; 2 = 1.8ms</strong>, total ~2ms per write. The flushes alone account for 90% of the latency, producing the 37x slowdown from ~16k IOPS down to ~430. The green dots (reads) are the COW source reads.
 </div>
 
 <div class="callout">
@@ -292,7 +292,7 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 <tr><td>Thin + Snapshot</td><td class="num">10,100 IOPS</td><td class="num"><strong>290 IOPS</strong></td></tr>
 </table>
 
-<p>Several things become clear from this table. Adding fsync to plain linear drops IOPS from 17,900 to 806 (22x) &mdash; this is purely the cost of flushing the device cache on every write. Adding fsync to dm-snapshot barely changes anything (422 &rarr; 315, 1.3x), because it's already flushing on every write. Comparing with fsync (which levels the playing field), the snapshot COW overhead is 806 &rarr; 315 = 2.6x &mdash; the cost of reading the old block, copying it, and writing the mapping table.</p>
+<p>Several things become clear from this table. Adding fsync to plain linear drops IOPS from 17,900 to 806 (22x) &mdash; this is purely the cost of flushing the device cache on every write. Adding fsync to dm-snapshot barely changes anything (422 &rarr; 315, 1.3x), because it's already flushing on every write. With fsync leveling the playing field, the snapshot COW overhead is 806 &rarr; 315 = 2.6x &mdash; the cost of reading the old block, copying it, and writing the mapping table.</p>
 
 <p>dm-thin tells a different story. Without fsync, snapshots barely matter (10,900 &rarr; 10,100 IOPS). But with fsync, thin drops to <strong>290 IOPS</strong> &mdash; even slower than dm-snapshot (315). This is because each fsync forces a full dm-thin metadata transaction commit with 3 flushes, compared to dm-snapshot's 2 flushes per COW.</p>
 
@@ -381,7 +381,7 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
 <h3>Why ZFS writes 23x more than requested</h3>
 <p>ZFS's default <code>recordsize=128KB</code> is the culprit. When fio writes 4KB to a record, ZFS COWs the <strong>entire 128KB record</strong> to a new location. That's a 32x data amplification before metadata is even counted.</p>
 
-<p>Additionally, ZFS batches writes into <strong>Transaction Groups (TXGs)</strong> that flush approximately every 5 seconds. It ignores <code>O_DIRECT</code> and caches everything in the ARC, then writes large sequential batches across the disk's metaslab allocator. This is why the ZFS panel shows writes scattered across the full 10GB &mdash; the metaslab allocator intentionally distributes writes for wear leveling.</p>
+<p>Additionally, ZFS batches writes into <strong>Transaction Groups (TXGs)</strong> that flush approximately every 5 seconds. It ignores <code>O_DIRECT</code> and caches everything in the ARC, then writes large sequential batches via the metaslab allocator. This is why the ZFS panel shows writes scattered across the full 10GB &mdash; the metaslab allocator intentionally distributes writes for wear leveling.</p>
 
 <div class="callout">
 <strong>Setting <code>recordsize=4k</code></strong> would eliminate the record-level amplification for this workload, but would hurt sequential read performance. This is a fundamental ZFS tradeoff for mixed workloads.

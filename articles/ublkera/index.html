@@ -158,7 +158,7 @@ footer { margin-top: 60px; padding: 24px 0; border-top: 1px solid #222; color: v
  ├─ device 1: supervisor thread ── /dev/ublkb1 ⇄ b.img   (era map + metadata)
  └─ ... add / del at runtime</code></pre>
 
-<p>The workflow it replaces is pleasantly boring. Attach any file or block device at runtime and a <code>/dev/ublkbN</code> appears; everything speaks one-line JSON over a unix socket:</p>
+<p>The workflow that replaces it is pleasantly boring. Attach any file or block device at runtime and a <code>/dev/ublkbN</code> appears; everything speaks one-line JSON over a unix socket:</p>
 
 <pre><code>$ sudo ublkera add -f /data/a.img --meta /var/lib/ublkera/a.meta
 {"ok":true,"dev_id":0,"bdev":"/dev/ublkb0","granularity":65536,"current_era":1}
@@ -367,7 +367,7 @@ diff diff-hash.txt diff-era.txt \
      1647    1.12   21.47   22.60    2  |__ublkb0-q2
      1648    1.12   21.47   22.60    3  |__ublkb0-q3</code></pre>
 
-<p>The IOPS barely move between the two rows because this backing — not the CPU — is the bottleneck. Queues add usable CPU; that turns into throughput only when CPU is what you are short of.</p>
+<p>The IOPS barely move between the two rows because the backing device — not the CPU — is the bottleneck. Queues add usable CPU; that turns into throughput only when CPU is what you are short of.</p>
 
 <h2>dm-era vs ublkera</h2>
 
@@ -393,7 +393,7 @@ diff diff-hash.txt diff-era.txt \
 <tr><td>ublkera (gran 64&nbsp;KiB, <code>-b 512K</code>)</td><td class="num">2,219 IOPS</td><td class="num">4,447 w/s @ 512&nbsp;KiB — ×2</td></tr>
 </table>
 
-<p>Here the host’s cache still absorbs the ×16 amplification; on real hardware it is not free — per-request fixed costs, queue occupancy, and sequential behavior all degrade with 64&nbsp;KiB fragments. The design consequence: in dm-era, choosing finer tracking granularity directly worsens the IO shape; in ublkera, granularity and request size are independent knobs.</p>
+<p>Here the host’s cache still absorbs the ×16 amplification; on real hardware it is not free — per-request fixed costs, queue occupancy, and sequential behavior all get worse with 64&nbsp;KiB fragments. The design consequence: in dm-era, choosing finer tracking granularity directly worsens the IO shape; in ublkera, granularity and request size are independent knobs.</p>
 
 <p>Second, raw throughput across four workloads (4 fio jobs, <code>direct=1</code>, host page cache bypassed via <code>cache=none</code>; block size fixed per row so the numbers are comparable — 4&nbsp;KiB never splits on either side):</p>
 
