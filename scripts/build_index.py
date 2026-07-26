@@ -3,7 +3,9 @@
 
 Each article lives in its own directory under articles/ and must contain an
 index.html with a <title> tag. A <p class="subtitle"> is used as the summary
-if present. Dates come from git history (first/last commit touching the dir).
+if present. Dates come from the article's JSON-LD datePublished/dateModified
+(so publish dates are adjustable per article); git history (first/last commit
+touching the dir) is the fallback for articles without them.
 """
 
 import html
@@ -22,6 +24,8 @@ SITE_DESCRIPTION = "Notes on storage, kernels, and things measured rather than a
 
 TITLE_RE = re.compile(r"<title>(.*?)</title>", re.S)
 SUBTITLE_RE = re.compile(r'<p class="subtitle">(.*?)</p>', re.S)
+DATE_PUB_RE = re.compile(r'"datePublished"\s*:\s*"(\d{4}-\d{2}-\d{2})"')
+DATE_MOD_RE = re.compile(r'"dateModified"\s*:\s*"(\d{4}-\d{2}-\d{2})"')
 
 
 def git(*args: str) -> list[str]:
@@ -62,7 +66,13 @@ def collect_articles() -> list[dict]:
         text = index.read_text(encoding="utf-8")
         title_m = TITLE_RE.search(text)
         subtitle_m = SUBTITLE_RE.search(text)
-        published, updated = git_dates(index.parent)
+        pub_m = DATE_PUB_RE.search(text)
+        if pub_m:
+            published = pub_m.group(1)
+            mod_m = DATE_MOD_RE.search(text)
+            updated = mod_m.group(1) if mod_m else published
+        else:
+            published, updated = git_dates(index.parent)
         articles.append({
             "slug": index.parent.name,
             "has_ja": (index.parent / "index.ja.html").exists(),
