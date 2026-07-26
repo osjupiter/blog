@@ -53,6 +53,11 @@ footer { margin-top: 64px; color: #555; font-size: 0.85em; border-top: 1px solid
 <h1><span class="prompt">$</span> osjupiter</h1>
 <p class="tagline">Notes on storage, kernels, and things measured rather than assumed.</p>
 <div class="article">
+<h2><a href="articles/go-ublk-tail-latency/">A ublk Loopback Device in Pure Go: GC Tuning and a Comparison with Rust’s rublk</a></h2>
+<p>Building a userspace block device without cgo, then chasing tail latency down through the Go runtime: pprof finds two bottlenecks, going async lifts the ceiling 12x, sync.Pool erases the GC tail, and RawSyscall refunds the runtime&#x27;s fixed costs to match Rust&#x27;s rublk.</p>
+<div class="meta">2026-07-26 · <a href="articles/go-ublk-tail-latency/index.ja.html">日本語</a></div>
+</div>
+<div class="article">
 <h2><a href="articles/plp-fsync/">What Power-Loss Protection Buys: fsync Benchmarks of a Used Enterprise SSD vs. a Consumer NVMe</a></h2>
 <p>dm-snapshot&#x27;s flush costs sent me to an auction for a used Intel DC S3710. The comparison is imperfect — no SATA slot left, so the S3710 sits behind a USB bridge — but with fdatasync on the write path the PLP drive still comes out ahead, and physical flush accounting shows why.</p>
 <div class="meta">2026-07-17 · <a href="articles/plp-fsync/index.ja.html">日本語</a></div>
