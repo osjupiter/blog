@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>cgoなしのGoでublkループバックデバイスを実装し、テールレイテンシをRust実装と比較する</title>
+<meta name="description" content="cgoなしの純Goでublkブロックデバイスを実装し、テールレイテンシを追い込む。pprofが特定した2つのボトルネック、非同期化で飽和IOPSが12倍、sync.PoolがGCのテールを消し、RawSyscallでランタイム固定費を返上してRust製rublkに並ぶまでの実測記録。">
+<link rel="canonical" href="https://osjupiter.github.io/blog/articles/go-ublk-tail-latency/index.ja.html">
+<link rel="alternate" hreflang="en" href="https://osjupiter.github.io/blog/articles/go-ublk-tail-latency/">
+<link rel="alternate" hreflang="ja" href="https://osjupiter.github.io/blog/articles/go-ublk-tail-latency/index.ja.html">
+<link rel="alternate" hreflang="x-default" href="https://osjupiter.github.io/blog/articles/go-ublk-tail-latency/">
+<meta property="og:site_name" content="osjupiter">
+<meta property="og:title" content="cgoなしのGoでublkループバックデバイスを実装し、テールレイテンシをRust実装と比較する">
+<meta property="og:description" content="純Goのublkサーバでテールレイテンシを追い込む。GC、sysmon、Rust製rublkとの比較の実測記録。">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://osjupiter.github.io/blog/articles/go-ublk-tail-latency/index.ja.html">
+<meta name="twitter:card" content="summary">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "cgoなしのGoでublkループバックデバイスを実装し、テールレイテンシをRust実装と比較する",
+  "description": "純Goのublkサーバでテールレイテンシを追い込む。GC、sysmon、Rust製rublkとの比較の実測記録。",
+  "url": "https://osjupiter.github.io/blog/articles/go-ublk-tail-latency/index.ja.html",
+  "inLanguage": "ja",
+  "datePublished": "2026-07-26",
+  "dateModified": "2026-07-26",
+  "author": {"@type": "Person", "name": "osjupiter", "url": "https://github.com/osjupiter"}
+}
+</script>
+<style>
+:root {
+  --bg: #0c0c0c; --bg2: #151515; --bg3: #1a1a1a;
+  --fg: #d4d4d4; --fg2: #888; --accent: #0af;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; line-height: 1.7; }
+.container { max-width: 860px; margin: 0 auto; padding: 40px 24px; }
+h1 { font-size: 2em; line-height: 1.3; margin-bottom: 8px; color: #fff; }
+.subtitle { color: var(--fg2); font-size: 1.05em; margin-bottom: 40px; }
+h2 { font-size: 1.4em; margin: 48px 0 16px; color: #eee; border-bottom: 1px solid #222; padding-bottom: 8px; }
+h3 { font-size: 1.15em; margin: 32px 0 12px; color: #ccc; }
+h4 { font-size: 1em; margin: 24px 0 8px; color: #bbb; }
+p { margin-bottom: 16px; color: var(--fg); }
+ul, ol { margin: 0 0 16px 24px; }
+li { margin-bottom: 8px; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { background: var(--bg3); padding: 2px 6px; border-radius: 3px; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.9em; color: #ddd; }
+pre { background: var(--bg2); padding: 16px; border-radius: 6px; overflow-x: auto; margin: 16px 0; border: 1px solid #222; }
+pre code { background: none; padding: 0; font-size: 0.85em; line-height: 1.5; }
+table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.9em; }
+th, td { padding: 8px 12px; border: 1px solid #222; text-align: left; }
+th { background: var(--bg2); color: #ccc; font-weight: 600; }
+pre.mermaid { background: none; border: none; display: flex; justify-content: center; }
+img.fig { max-width: 100%; background: #fcfcfb; border-radius: 6px; padding: 8px; margin: 16px 0; display: block; }
+strong { color: #fff; }
+.lang-switch { display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 0.8em; color: #555; margin-bottom: 16px; }
+.lang-switch strong { color: #ccc; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="container">
+<div class="lang-switch"><a href="../../">← 記事一覧</a><span><a href="./">EN</a> · <strong>日本語</strong></span></div>
+
+<h1>cgoなしのGoでublkループバックデバイスを実装し、テールレイテンシをRust実装と比較する</h1>
+<p class="subtitle">純Goのユーザ空間ブロックデバイスでテールレイテンシを追い込む。pprofが特定した2つのボトルネック、非同期化で飽和IOPSが12倍、sync.PoolがGCのテールを消し、そしてRawSyscallでランタイム固定費を返上してRust製rublkに並ぶまでの実測記録。</p>
+
+<p>Linuxには<strong>ublk</strong>という、ユーザ空間でブロックデバイスを実装する仕組みがあります（kernel 6.0以降）。
+NBDのようにネットワーク越しではなく、io_uringの<code>uring_cmd</code>でカーネルと直結するので、ユーザ空間を経由するオーバーヘッドが小さく抑えられています。</p>
+
+<p>これを<strong>cgoなしの純Go</strong>で実装します。ファイルをbackingにしたループバックデバイス（<code>/dev/loop0</code>の自作版）を作り、<code>/dev/ublkbN</code>として使えるようにします。
+そしてfioでテールレイテンシ（p90、p99、p99.9）を計測しながら、次の工程を進めます。</p>
+
+<ol>
+<li>まず動くものを素朴に作り、GCがテールレイテンシを壊すのを観測する</li>
+<li><code>pprof</code>と<code>GODEBUG=gctrace=1</code>で原因を特定し、非同期化、<code>sync.Pool</code>、固定バッファと1段階ずつ改善する</li>
+<li>同じものをRustで実装した<strong>rublk</strong>（ublk開発元の公式実装）と、スループット、テール、CPU効率を比較する</li>
+<li>それでも残るCPUの差をスレッド単位に分解してGoランタイムのsysmonを特定し、RawSyscallでその介入を止める</li>
+</ol>
+
+<p>以降はすべて実測です。
+検証はすべてQEMU/KVM上の使い捨てVM（Ubuntu 24.04、kernel 6.8）で行い、コード全文はgoblkリポジトリに置いてあります。</p>
+
+<h2>ublkの仕組み</h2>
+
+<p>登場人物は3つです。</p>
+
+<ul>
+<li><code>/dev/ublk-control</code>：制御用のキャラクタデバイス。デバイスの追加、削除、起動コマンドはここに発行する</li>
+<li><code>/dev/ublkcN</code>：デバイス毎のキャラクタデバイス。IO要求の受け渡し（データプレーン）はここ</li>
+<li><code>/dev/ublkbN</code>：最終的に作成されるブロックデバイス。mkfsやfioの対象はこれ</li>
+</ul>
+
+<p>面白いのは、制御もデータもすべてio_uringの<code>IORING_OP_URING_CMD</code>で行うところです。
+ioctlのように同期発行するのではなく、SQE（submission queue entry、発行キューのエントリ）の中にコマンド構造体を埋め込んで非同期に発行し、結果はCQE（completion queue entry、完了キューのエントリ）で受け取ります。</p>
+
+<pre class="mermaid">
+sequenceDiagram
+    participant App as IO要求 (アプリ)
+    participant K as カーネル (blk-mq / ublk_drv)
+    participant S as ublkサーバ
+    participant B as バックエンド (backingファイル)
+    S->>K: FETCH_REQ (tag=0..63) を事前に発行しておく
+    App->>K: read(2)
+    K-->>S: CQE (tag=k)。desc[k] に op/sector/長さ
+    S->>B: pread (backingファイルを読む)
+    B-->>S: データ
+    S->>K: COMMIT_AND_FETCH_REQ (result)
+    K-->>App: IO完了
+</pre>
+
+<p>queue depth（今回は64）ぶんの<code>FETCH_REQ</code>を最初に全部発行しておき、以後は「CQEを受ける、処理する、<code>COMMIT_AND_FETCH_REQ</code>を返す」の繰り返しで、1 IOにつき1往復です。
+要求の中身（オペコード、開始セクタ、長さ）は<code>ublksrv_io_desc</code>という24バイトの構造体で渡されますが、syscallではなく<code>/dev/ublkcN</code>をmmapした共有メモリ越しに読みます。</p>
+
+
+<h2>cgoなしでio_uringを使う</h2>
+
+<p>Goでio_uringを使うライブラリはいくつかありますが、ublkに必要なのは<code>SQE128</code>（SQEを128バイトに拡張してコマンド埋め込み領域を確保する設定）と<code>uring_cmd</code>くらいなので、標準ライブラリの<code>syscall</code>パッケージだけで最小実装しました。
+依存ゼロです。
+やることは3つあります。</p>
+
+<p><strong>1. リングの作成。</strong> <code>io_uring_setup(2)</code>（x86_64ではsyscall番号425）を呼び、返ったfdをmmapします（SQ（submission queue）リング、CQ（completion queue）リング、SQE配列の3領域。最近のカーネルはSQとCQが単一mmapにまとまります）。</p>
+
+<p><strong>2. SQEの投入。</strong> SQE配列の<code>tail &amp; mask</code>番目に書いてアトミックにtailを進めます。
+<code>SQE128</code>では1エントリ128バイトで、オフセット48以降の80バイトが<code>cmd</code>領域です。
+ublkのコマンド構造体（制御用32バイト、IO用16バイト）をここに直接埋めます。</p>
+
+<pre><code>type SQE struct {
+	Opcode      uint8
+	Flags       uint8
+	Ioprio      uint16
+	FD          int32
+	Off         uint64 // uring_cmdではここがcmd_op (u32)
+	Addr        uint64
+	Len         uint32
+	OpFlags     uint32
+	UserData    uint64
+	BufIG       uint16
+	Personality uint16
+	SpliceFDIn  int32
+	Cmd         [80]byte // SQE128: offset 48〜127がコマンド領域
+}</code></pre>
+
+<p><strong>3. 送信と完了待ち。</strong> <code>io_uring_enter(2)</code>（426）を<code>IORING_ENTER_GETEVENTS</code>付きで呼ぶとブロッキングで完了を待てます。
+CQは<code>head != tail</code>の間、16バイトのCQEを読んでheadを進めるだけです。</p>
+
+<p>リング上のhead/tailはカーネルと並行アクセスになるので、<code>sync/atomic</code>で読み書きします（liburingのacquire/releaseバリアに対応します）。
+ここまでで300行強。「io_uringライブラリ」は、機能を絞れば案外小さいのです。</p>
+
+<h2>ublkプロトコルの実装</h2>
+
+<h3>制御プレーン</h3>
+
+<p>デバイス作成は次の順番で、すべて<code>/dev/ublk-control</code>への<code>uring_cmd</code>です。</p>
+
+<ol>
+<li><code>GET_FEATURES</code>：カーネルの対応フラグ確認</li>
+<li><code>ADD_DEV</code>：<code>ublksrv_ctrl_dev_info</code>（キュー数、queue depth、最大IOサイズ等）を渡す。<code>dev_id = 0xFFFFFFFF</code>で自動採番</li>
+<li><code>/dev/ublkcN</code>をopenし、ディスクリプタ領域をmmap</li>
+<li>各キューが全tagぶんの<code>FETCH_REQ</code>を投入</li>
+<li><code>SET_PARAMS</code>：デバイスサイズ、論理ブロックサイズなど</li>
+<li><code>START_DEV</code>：ここで<code>/dev/ublkbN</code>が作成される</li>
+</ol>
+
+<p>オペコードはkernel 6.4以降ioctl互換エンコードで、たとえば<code>ADD_DEV</code>は<code>_IOWR('u', 0x04, struct ublksrv_ctrl_cmd)</code>、すなわち<code>0xC0207504</code>です。</p>
+
+<h3>キューはOSスレッドに紐付く</h3>
+
+<p>ublk固有の制約がひとつあります。
+<strong>あるキューのIOコマンドは、最初に発行したOSスレッドから発行し続けなければなりません</strong>（カーネルがキューを担当taskに紐付けて検証します）。
+goroutineは自由にOSスレッドを移動するので、そのままだと<code>EINVAL</code>になります。キューを担当するgoroutineの先頭で<code>runtime.LockOSThread</code>を呼び、スレッドを固定する必要があります。</p>
+
+<pre><code>func (q *queue) run(ready chan&lt;- error) {
+	runtime.LockOSThread() // ublkはキューを最初に発行したtaskに紐付ける
+	...
+}</code></pre>
+
+<h3>ループバックのデータパス（まずは素朴に）</h3>
+
+<p>バックエンドはファイルです。
+起動時に普通の<code>open(2)</code>で<code>O_DIRECT</code>付きで開き、以後のIOはこのfdに対して行います。
+データ本体の受け渡しにはいくつかモードがあり、素朴版では<strong>user copyモード</strong>（<code>UBLK_F_USER_COPY</code>、kernel 6.4以降）を使います。バッファを事前登録せず、サーバが<code>/dev/ublkcN</code>を特殊オフセットでpread/pwriteしてデータを自分で移す方式です。リクエストが来るたびに次の処理をします。</p>
+
+<pre><code>buf := make([]byte, n)                      // 毎回確保
+switch op {
+case OpRead:
+	preadFull(backingFD, buf, off)          // backingファイルから読み
+	pwriteFull(cfd, buf, userCopyOff)       // ublkcN経由でカーネルへ渡す
+case OpWrite:
+	preadFull(cfd, buf, userCopyOff)        // カーネルからデータを回収し
+	pwriteFull(backingFD, buf, off)         // backingファイルへ書く
+case OpFlush:
+	syscall.Fdatasync(backingFD)
+}</code></pre>
+
+<p>user copyのpread/pwriteオフセットにはqueue idとtagをビット埋め込みします（<code>0x80000000 + qid&lt;&lt;41 + tag&lt;&lt;25</code>）。</p>
+
+<p>「使い終わったバッファは捨てる、掃除はGCの仕事」。
+普段のGoなら何の問題もないコードです。
+ブロックデバイスのデータパスでは、どうでしょうか。</p>
+
+<h2>計測条件（以降すべて共通）</h2>
+
+<ul>
+<li>VM：QEMU/KVM、8 vCPU / 4GiB、Ubuntu 24.04（kernel 6.8.0-136）</li>
+<li>backing：ホストのLVM thick LV（<strong>Intel DC S3710 400GB</strong>。PLP付きエンタープライズSATA、USBブリッジ経由）を、raw virtioディスク（<code>cache=none</code>、<code>aio=native</code>）としてVMへ渡し、ゲスト内のブロックデバイス（<code>/dev/vdc</code>、<code>/dev/vdd</code>）を直接バックエンドにする。ホストのページキャッシュは経由しない。8GiB×2、全域prefill済み</li>
+<li>生デバイスの素性（ゲストから計測）：4k randread QD1で217µs（4.3k IOPS）、QD64で約82k IOPS。4k randwrite QD64で45.6k IOPS。PLPのおかげで書き込みレイテンシが安定している</li>
+<li>デバイス：1キュー、queue depth 64、論理ブロック512B（goblkとrublkで一致）</li>
+<li>サーバは全スレッドをCPU 0-1へ<code>taskset</code>、fioはCPU 2-7</li>
+<li>fio：<code>--direct=1</code>、libaio、ramp 3秒。固定レート測定は60秒、飽和測定は20秒。4kランダムは飽和測定がQD64（queue depthと同じ）、固定レート測定がQD32。1MシーケンシャルはQD1（後述）</li>
+<li>レイテンシ比較は<strong>固定レート</strong>（<code>--rate_iops</code>）で実施する。飽和状態のレイテンシはLittleの法則で「QD÷スループット」に決まってしまうので、応答分布を比べるには全構成に同じ到着レートを与える</li>
+<li>到着レートは<strong>40k IOPS</strong>とする。非同期構成の飽和（randread 52〜59k、randwrite 45.3k）の7〜9割にあたる高負荷側で、行列待ちが実装差を増幅する</li>
+</ul>
+
+<h2>結果の先出し：4段階の比較</h2>
+
+<p>実装は4段階に分け、段階ごとに実装方式を1箇所だけ変えます。
+v1 sync-naive（毎IOで<code>make</code>、backing IOは同期）、v2 async-naive（backing IOだけ非同期化。アロケーションはv1と同一）、v3 async-pool（さらにバッファを<code>sync.Pool</code>で使い回す）、v4 prealloc（tag毎の固定バッファでアロケーション自体を排除）です。
+主指標は、実SSDバックエンドをQD64で飽和させたときの<strong>飽和IOPS</strong>です。同じデバイスを直接計測すると約80k IOPS出るので、ublkデバイス経由の性能がそれより低ければ、その差はデバイスではなく<strong>サーバ実装由来のオーバーヘッド</strong>だと言えます。</p>
+
+<table>
+<tr><th></th><th>変更点</th><th>飽和randread</th><th>CPU@40k</th><th>GC</th><th>p50</th><th>p90</th><th>p99</th><th>p99.9</th></tr>
+<tr><td>v1 sync-naive</td><td>（基準）</td><td><strong>4.3k</strong></td><td>12.9%</td><td>711回</td><td>7439µs※</td><td>8094µs</td><td>8586µs</td><td>9110µs</td></tr>
+<tr><td>v2 async-naive</td><td>非同期化</td><td>52.5k</td><td>43.8%</td><td>5719回</td><td>701µs</td><td>1004µs</td><td>1516µs</td><td>2311µs</td></tr>
+<tr><td>v3 async-pool</td><td>+ sync.Pool</td><td>56.7k</td><td>39.0%</td><td>5回</td><td>644µs</td><td>914µs</td><td>1139µs</td><td>1385µs</td></tr>
+<tr><td>v4 prealloc</td><td>+ 固定バッファ</td><td>55.9k</td><td>39.9%</td><td>0回</td><td>644µs</td><td>922µs</td><td>1139µs</td><td>1385µs</td></tr>
+<tr><td>生デバイス（参考）</td><td>ublkを介さない</td><td>82k</td><td>-</td><td>-</td><td>334µs</td><td>465µs</td><td>652µs</td><td>873µs</td></tr>
+</table>
+
+<p>飽和randreadはQD64で全力を出したときのIOPS、p50以降の列は40k IOPS固定レート（60秒）時のrandread応答分布です。</p>
+
+<p>※ v1は飽和スループットが4.3kしかなく、40kの要求を捌けないため行列遅延で数値が跳ね上がっています（後述）。</p>
+
+<img class="fig" src="figs/summary.png" alt="飽和スループットとCPU使用率">
+
+<img class="fig" src="figs/percentiles-randread.png" alt="randread 40k固定レートのパーセンタイル曲線">
+
+<img class="fig" src="figs/percentiles-randread-async.png" alt="同図のsync-naive抜き（非同期構成のみ）">
+
+<p>sync-naiveの行列値が対数軸を押し潰すので、非同期構成だけを拡大した図も並べています。</p>
+
+<p>図には後半で扱うv5（rawenter。ランタイム側の最適化）とRust実装rublkも含めています。曲線はラン間で安定するp50〜p99.9の範囲です（p99.99以上は60秒測定でも判定できないため載せていません）。
+支配的なのは構造で、非同期化だけで飽和IOPSが12倍になります（4.3k→52.5k。同期実装の上限は1÷デバイス往復217µs、つまりデバイスのQD1性能そのものです）。
+GCを消す効果は次の段で現れ、v2からv3でp99.9が2311µsから1385µsへ4割縮みます。
+固定バッファの追加利得はこのレートでは誤差の範囲です。</p>
+
+<h2>v1：素朴実装の計測</h2>
+
+<p>飽和スループット（QD64）はrandread <strong>4,335 IOPS</strong>。
+生デバイスをQD1で計測したときの4,328 IOPSとほぼ一致します。
+つまりキューに64本積まれていても、サーバが1本ずつしか捌かないので、上限は「1÷デバイス往復217µs」に張り付きます。
+40k固定レートを流し込むと当然捌けず、行列遅延でp50が7.4msまで跳ね上がりました。</p>
+
+<pre><code>sync-naive:  飽和 4.3k IOPS。40k要求時は p50=7439µs（行列遅延）</code></pre>
+
+<p>原因はpprofによるプロファイリングで2つ特定できます。
+1つめはGCです。毎IOの<code>make([]byte, 4096)</code>のため、ライブヒープがほぼ空（<code>3->3->0 MB</code>）のまま数十ms毎にGCが走っており、アロケーションプロファイルもその1行を指しています。</p>
+
+<pre><code>gc 1593 @101.675s 0%: 0.018+0.18+0.002 ms clock, ..., 3->3->0 MB, 4 MB goal, 2 P
+
+$ go tool pprof -top -sample_index=alloc_space bin/goblk allocs.pb.gz
+    1.28GB 99.68%  ublk.(*queue).handleUserCopy   ← make([]byte, n)</code></pre>
+
+<p>2つめは同期直列です。backingファイルへのpread/pwriteを1本のループの中でブロックしたまま行っているので、1個のIOがファイルを読む間、残り63個は待たされます。CPUプロファイルでも、CPU時間の71%がこの同期preadの待ちです。</p>
+
+<pre><code>$ go tool pprof -top bin/goblk cpu.pb.gz
+     4.58s 87.40%  internal/runtime/syscall/linux.Syscall6
+     3.73s 71.18%  (cum) ublk.(*FileBackend).ReadAt   ← 同期preadで待ってる</code></pre>
+
+<p>つまりv1のボトルネックはGC（アロケーション）と同期直列（構造）の2つです。
+2つが混ざったまま次へ進むと個々の効果が測れないので、まず構造から直し、その上でアロケーション戦略だけを変えて比較します。</p>
+
+<h2>v2：backing IOを非同期化する</h2>
+
+<p>構造の修正です。backingファイルのIOを、ublkコマンドと同じio_uringに載せて非同期化します。
+ファイルIOの完了もCQEで受け、識別には<code>user_data</code>の最上位ビットを使います。
+アロケーション（毎IOの<code>make</code>）はv1のまま変えません。</p>
+
+<pre><code>CQE(ublk: tag=k の要求到着)
+  → backing fileへのREAD/WRITE SQEを発行 (user_data = tag | 1&lt;&lt;63)
+  → 他のtagの処理を継続                     ←← ここが同期版との違い
+CQE(backing IO完了, bit63あり)
+  → その結果で COMMIT_AND_FETCH_REQ</code></pre>
+
+<pre><code>async-naive:  p50=701µs  p90=1004µs  p99=1516µs  p99.9=2311µs   GC 5719回
+飽和: randread 52.5k IOPS</code></pre>
+
+<p>飽和IOPSは12倍になり、40k固定レートも捌けるようになりました（飽和の76%の負荷なので、p50=701µsには行列待ちぶんが乗っています）。
+テールと飽和IOPSの主因は同期直列だったことがここで確定します。
+一方でGCは残っています。むしろ捌けるIOPSが上がったぶんゴミの生成レートも上がり、GC回数は増えました。
+その影響でp99.9は2311µsと非同期構成の中で突出し、randreadの実効レートも39.3kと要求をわずかに取りこぼしています。次の段で取り除きます。</p>
+
+<h2>v3：sync.Pool</h2>
+
+<p>v1とv2では、IOのデータ本体を入れるバッファを毎回<code>make([]byte, n)</code>で確保し、使い終わったら捨てていました。
+これをやめて、<code>sync.Pool</code>から借りて使い終わったら返す方式にし、同じバッファを使い回します。
+あわせてデータの受け渡しを、pread/pwriteで自分がコピーする方式から、FETCH/COMMIT時にバッファのアドレスをカーネルへ登録してコピーを任せる方式（ublkのデフォルトの転送方式）に切り替えます。
+WRITEのデータはCQEが届いた時点でバッファに入っており、READはCOMMIT時にカーネルが回収するため、データパスのsyscallはio_uring_enterだけになります。</p>
+
+<pre><code>q.pool = &amp;sync.Pool{New: func() any {
+	b := make([]byte, maxIOBytes) // 最大IOサイズで確保して使い回す
+	return &amp;b
+}}
+bp := q.pool.Get().(*[]byte)
+buf := (*bp)[:n]
+defer q.pool.Put(bp)</code></pre>
+
+<p>実装上の注意が2つあります。どちらも<code>sync.Pool</code>一般の作法です。
+1つめ、Poolに入れるのは<code>[]byte</code>ではなく<code>*[]byte</code>です。Poolの出し入れはinterface（<code>any</code>）経由なので、ポインタでない値を入れると毎回スライスヘッダのヒープへのコピー（ボックス化）が起き、アロケーションを消すためのPoolが逆にアロケートします。<a href="https://pkg.go.dev/sync#Pool">sync.Poolのドキュメントの例</a>にも、Newはポインタ型を返すべきと明記されています。
+2つめ、バッファは最大IOサイズで確保して先頭nバイトだけ使い、全エントリのメモリコストを揃えます。可変サイズのままPoolに入れると、小さい要求が大きなバッファを占有し続けたり、取り出したバッファが要求サイズに足りず確保し直しになったりするためです（<a href="https://go.dev/issue/23199">golang/go#23199</a>。標準ライブラリのfmtも同じ理由でPoolに戻すバッファのサイズを制限しています）。</p>
+
+<pre><code>async-pool:  p50=644µs  p90=914µs  p99=1139µs  p99.9=1385µs   GC 5回
+飽和: randread 56.7k IOPS</code></pre>
+
+<p>GCは5719回から5回になりました。
+p99.9は2311µsから1385µsへ4割縮み、v2で取りこぼしていた40kの要求も完全に捌けるようになりました。
+GCの停止1回は短くても、止まっている間に毎秒4万の要求が行列に積もるので、負荷が高いほどGCの害は増幅されます。
+p50も701µsから644µsへ動いていますが、こちらはこの段で切り替えた転送方式（データパスのsyscall削減）の寄与も混ざっています。テールの4割はGC消滅の寄与です。</p>
+
+<h2>v4：固定バッファでアロケーションを排除する</h2>
+
+<p>最後に、sync.Poolを介した動的なバッファ管理もやめます。
+queue depthは64で固定、tagごとに同時に1つのIOしか走らないので、必要な領域はtagごとに1つ、計64個と最初から確定しています。
+起動時にmmapで確保し（Goヒープ外なのでGCのスキャン対象外）、tag毎の固定アドレスとしてカーネルに登録します。</p>
+
+<pre><code>prealloc:  p50=644µs  p90=922µs  p99=1139µs  p99.9=1385µs   GC 0回
+飽和: randread 55.9k IOPS</code></pre>
+
+<p>GCは完全に0回になりましたが、v3との差はレイテンシもCPUも測定ノイズの範囲で、思ったほどの効果はありません。
+v3の時点でGCは60秒に5回まで減っていて、取り除ける干渉がほとんど残っていなかったためです。
+この段の意味は性能よりも、後述のランタイム最適化（rawenter）の前提になる「データパスが一切アロケートしない」状態を作ることにあります。</p>
+
+<h3>GCの挙動を図で見る</h3>
+
+<p>4段階を同一負荷（randread 40k IOPS、60秒）で走らせ、ランタイムのアロケーションとGCのカウンタを25ms間隔でサンプリングしました。</p>
+
+<img class="fig" src="figs/gc-alloc.png" alt="累積GC回数と累積ヒープアロケーション">
+
+<p>左：async-naiveは60秒で2771回、およそ22msに1回のペースでGCを刻み続けます。sync-naiveが280回にとどまるのは、実効4.3k IOPSしか出ないためゴミの生成も10分の1になるからです。poolとpreallocは実質走りません。
+右（対数軸に注意）：累積アロケーションはasync-naiveの約9.9GBに対しpoolは52MB、preallocは0.2MBです。
+poolの52MBは「同時に借りられている最高数」ぶんの在庫です（階段状に増えて以後は完全に水平。定常状態の傾きはゼロ）。
+だからGCが起動しなくなる、という理屈が線の形でそのまま見えます。</p>
+
+<img class="fig" src="figs/heap-sawtooth.png" alt="ライブヒープの鋸歯">
+
+<p>ライブヒープのズーム（20〜30秒）です。
+naive系は「確保、ヒープ目標4MBに到達、GCで回収」の鋸歯を刻み続け、この歯の一枚一枚がデータパスへのCPU干渉になります。
+poolとpreallocは水平です。</p>
+
+<h4>取り方</h4>
+
+<p><code>runtime.ReadMemStats</code>は呼ぶたびにstop-the-worldするので、計測対象を計測が汚します。
+Go 1.16以降の<code>runtime/metrics</code>はロックフリーで読めるのでこちらを使います。
+さらに書き出しでアロケートするとpoolやpreallocの「ゼロ」が偽物になるため、<code>strconv.Append*</code>で固定バッファに整形します。</p>
+
+<pre><code>samples := []metrics.Sample{
+	{Name: "/gc/heap/allocs:bytes"},              // 累積アロケーション
+	{Name: "/gc/heap/frees:bytes"},               // 累積解放
+	{Name: "/memory/classes/heap/objects:bytes"}, // ライブヒープ
+	{Name: "/gc/cycles/total:gc-cycles"},         // GC回数
+}
+for range time.Tick(25 * time.Millisecond) {
+	metrics.Read(samples) // STWなし
+	buf = strconv.AppendFloat(buf[:0], time.Since(start).Seconds(), 'f', 3, 64)
+	for _, s := range samples {
+		buf = strconv.AppendUint(append(buf, ','), s.Value.Uint64(), 10)
+	}
+	f.Write(append(buf, '\n'))
+}</code></pre>
+
+<p>goblkでは<code>-metrics out.csv</code>で有効化できます。採取と描画は次の通りです。</p>
+
+<pre><code>$ sudo ./goblk -impl naive -backend loop -file /dev/vdc -metrics /tmp/naive.csv &amp;
+$ fio --rate_iops=40000 ... --runtime=60   # 負荷をかける
+$ python3 bench/plot_metrics.py            # matplotlibでPNG生成</code></pre>
+
+<p>GC回数だけなら<code>GODEBUG=gctrace=1</code>の行数を数えるのでも同じ値が取れます（今回も突き合わせて一致を確認しました）。
+gctraceは各GCのSTW時間やヒープ目標も載っているので、両方仕込んでおくのがおすすめです。</p>
+
+<h2>Rust実装rublkとの比較</h2>
+
+<p>比較相手は<a href="https://github.com/ublk-org/rublk">rublk</a>。ublkのカーネルメンテナが属するublk-org公式のRust実装（libublk-rsベース）です。
+<code>cargo install rublk</code>で入り、<code>rublk add loop</code>で同じくループバックデバイスを作れます。</p>
+
+<p>言語の比較として成立させるために、条件を揃えます。
+1キュー、queue depth 64、max IO 512KiB、論理ブロック512B（いずれも両者一致を確認）。
+backingはここまでと同じS3710上のprefill済み8GiB LVで、goblkには<code>/dev/vdc</code>、rublkには<code>/dev/vdd</code>を専用に割り当てます。
+両者O_DIRECT（rublkは<code>direct_io=1</code>がデフォルト）、起動後に全スレッドをCPU 0-1へ強制ピニングします。</p>
+
+<pre><code>飽和(randread):  goblk v4: 55.9k   rublk: 59.3k
+
+40k固定レート: p50    p90    p99    p99.9   CPU
+goblk v4:     644µs  922µs  1139µs 1385µs  39.9%
+rublk:        619µs  881µs  1090µs 1319µs  32.3%</code></pre>
+
+<p>レイテンシ分布はp50からp99.9まで全域でrublkが数%良いものの、ほぼ互角です。
+はっきり差が出るのはCPUで、同じ40k IOPSを捌くのにgoblkは<strong>1.2倍</strong>、7.6pt余計に使っています（39.9% vs 32.3%）。
+GCはゼロのはずなのに、です。この差の原因を最後まで追います。</p>
+
+<h2>差の内訳をスレッド単位に分解する</h2>
+
+<p>perfのtracepointとpidstatをスレッド単位で見ます（この節の深掘り数値はbackingをファイルにした予備実験の環境で取得したものですが、機構の説明はS3710環境にもそのまま当てはまります）。</p>
+
+<pre><code>goblk v3 (合計51.7%):                     rublk (合計39.6%):
+  キューループ:   39.5%                      キュースレッド: 39.6%
+  謎のスレッド:   10.3%                      (以上)
+  その他:         ~2.3%
+perf (8秒):
+  io_uring_enter  52,215                    (rublkはfutex/nanosleepともほぼ0)
+  futex          169,259   ← 21k/s!
+  nanosleep       45,107   ← 5.6k/s</code></pre>
+
+<p>意外なのは、<strong>IOを実際に捌くGoのスレッド単体はRustと同コスト（39.5% vs 39.6%）</strong>だという点です。
+pprofでもGoユーザコードのCPUは測定誤差レベルでした。
+1 IOあたりのコード品質では負けていません。</p>
+
+<p>差額を食っているのは2つです。
+まず毎秒5.6千回nanosleepを打つスレッド、<strong>sysmon</strong>。
+Goランタイムの監視スレッドで、syscallに20µs以上ブロックしたgoroutineからPを取り上げる（retake）等の仕事を、負荷がある間20µs〜数百µs間隔で永久に繰り返します（<code>runtime/proc.go</code>。間隔は20µs起点で、仕事がないと倍々にバックオフし、上限10ms）。
+そして毎秒21千回のfutex。キューgoroutineがsyscallでブロックするたびに発生する<strong>Pの受け渡し</strong>の同期コストです。
+どちらも「ブロッキングsyscallを軸にしたスレッド専有設計」をGoの上でやると必然的に付いてくる、ランタイムの固定費です。
+rublkにこれが皆無なのは、Rustには「ブロック中のスレッドから何かを取り上げる」スケジューラがそもそも存在しないからです。</p>
+
+<h3>sysmonを起こさない：RawSyscall</h3>
+
+<p>sysmonを止める公式手段はありません。
+ただしソースを読むと、retakeできるPを見つけられない状態が続けば、起床間隔が勝手に10msまでバックオフする設計です。
+なら、見つけさせなければいい。
+sysmonにPの存在を教えているのはGoの<code>syscall.Syscall6</code>が呼ぶ<code>entersyscall</code>/<code>exitsyscall</code>の自己申告なので、申告しなければいいのです。
+<code>syscall.RawSyscall6</code>はこれを丸ごとスキップします。</p>
+
+<p>これは本来禁じ手です。
+Rawでブロックすると、そのgoroutineはランタイムから「実行中」に見え続け、Pを譲らず、プリエンプションも効きません。
+一般コードでやるとスケジューラ飢餓やGCのSTW遅延を招きます。
+goblkで許されるのは、キューgoroutineが<code>LockOSThread</code>で専用スレッドを持ち（そのPを他が当てにしない）、データパスがゼロアロケーションでGCが走らない、という条件が揃っているからです。
+さらにアイドル時に無期限ブロックすると理論上STWを遅らせてしまうので、raw待機は<code>IORING_ENTER_EXT_ARG</code>の<strong>50msタイムアウト付き</strong>にして、最悪でも50msに一度はセーフポイントに戻る保険を掛けました（タイムアウト設定のコストは待機1回あたり数十ns、CPUにして0.5pt未満です）。</p>
+
+<p>これを<strong>v5</strong>とします。v2〜v4が実装構造とアロケーションの改善だったのに対し、v5はランタイムの挙動に対する独立した最適化です（前提はデータパスでGCがほぼ走らないことなので、v3以降なら適用できます）。<code>-rawenter</code>の効果です。</p>
+
+<pre><code>40k固定レート:  p50    p90    p99    p99.9   CPU     sysmon起床
+goblk v4:      644µs  922µs  1139µs 1385µs  39.9%   数千回/s
+goblk v5(raw): 611µs  889µs  1106µs 1352µs  32.9%   ~100回/s
+rublk:         619µs  881µs  1090µs 1319µs  32.3%   -
+
+飽和(randread): goblk v5 58.0k  (rublk: 59.3k)</code></pre>
+
+<p>sysmonの起床間隔は上限の10msまで自然にバックオフして約100回/sとなり、無害化されました。futexも0.3k/sまで減りました。
+プロセスの形が「実働スレッド1本」というrublkと同じになり、CPUは32.9%とrublkの32.3%に並び、レイテンシ分布も重なります。
+Goのランタイム固定費を返上すると、Rust実装と同等のところまで到達できます。</p>
+
+<h3>sysmonとhandoffを時系列で見る</h3>
+
+<p>「アイドル30秒、40k IOPS負荷30秒、アイドル30秒」を仕掛けて、sysmonの起床（nanosleep）とPの受け渡しの同期（futex。handoffそのものの回数はランタイム外から数えられないので、その実装に使われるfutex syscallを代理指標にしています）を毎秒カウントしたのがこの図です。</p>
+
+<img class="fig" src="figs/sysmon-futex.png" alt="sysmon起床とfutexの毎秒レート">
+
+<p>通常のsyscall経路（rawenterなし）は負荷が来た瞬間にsysmonが毎秒4千回前後起き、futexは4〜8千回/sで変動し、負荷が消えると全Pアイドルを検知してsysmonは休止します（0回/s）。
+一方rawenterは負荷中もアイドル中もnanosleep約100回/s、futex約300回/sの水平線のままです。
+「固定費」が本当に固定になったことが、そのまま線の形に出ています。</p>
+
+<p>取り方は<code>perf stat</code>のインターバルモードです。</p>
+
+<pre><code>$ sudo perf stat -I 1000 -x, \
+    -e syscalls:sys_enter_nanosleep,syscalls:sys_enter_futex \
+    -p $(pgrep -o goblk) -o perf.csv</code></pre>
+
+<p>rawenterには副作用が2つあります。
+完全アイドル時だけは通常のsyscall経路の方が省エネです（ランタイムが全Pアイドルを検知してsysmonが停止するのに対し、rawenterは10ms間隔の起床が残ります。CPUにして0.1〜0.3%）。
+また、raw待機中のスレッドを<code>ps</code>で見ても<code>D</code>ステートにはならず、通常の<code>S</code>（interruptible sleep）のままです。</p>
+
+<h2>全構成の結果一覧</h2>
+
+<p>固定レート40k IOPS（4k、60秒）での分布と、飽和スループットです。
+各構成の計測前にカナリアプローブ（生デバイス80.8〜83.6kで安定）を確認しています。</p>
+
+<table>
+<tr><th></th><th>randread p50</th><th>p90</th><th>p99.9</th><th>randwrite p50</th><th>p99.9</th><th>CPU@40k</th><th>GC</th><th>飽和randread</th><th>飽和randwrite</th></tr>
+<tr><td>v1 sync-naive</td><td>7439µs※</td><td>8094µs</td><td>9110µs</td><td>5211µs※</td><td>7767µs</td><td>12.9%</td><td>711回</td><td>4.3k</td><td>6.2k</td></tr>
+<tr><td>v2 async-naive</td><td>701µs</td><td>1004µs</td><td>2311µs</td><td>701µs</td><td>1663µs</td><td>43.8%</td><td>5719回</td><td>52.5k</td><td>45.1k</td></tr>
+<tr><td>v3 async-pool</td><td>644µs</td><td>914µs</td><td>1385µs</td><td>693µs</td><td>1582µs</td><td>39.0%</td><td>5回</td><td>56.7k</td><td>45.3k</td></tr>
+<tr><td>v4 prealloc</td><td>644µs</td><td>922µs</td><td>1385µs</td><td>701µs</td><td>1598µs</td><td>39.9%</td><td>0回</td><td>55.9k</td><td>45.3k</td></tr>
+<tr><td>v5 rawenter</td><td><strong>611µs</strong></td><td>889µs</td><td>1352µs</td><td>693µs</td><td><strong>1500µs</strong></td><td>32.9%</td><td>0回</td><td>58.0k</td><td>45.3k</td></tr>
+<tr><td>rublk (Rust)</td><td>619µs</td><td><strong>881µs</strong></td><td><strong>1319µs</strong></td><td>693µs</td><td>1532µs</td><td><strong>32.3%</strong></td><td>0回</td><td><strong>59.3k</strong></td><td>45.3k</td></tr>
+<tr><td>生デバイス（参考）</td><td>334µs</td><td>465µs</td><td>873µs</td><td>545µs</td><td>1205µs</td><td>-</td><td>-</td><td>82k</td><td>45.6k</td></tr>
+</table>
+
+<p>※ v1は飽和スループットが4.3kのため、40k要求では飽和状態（行列遅延）。GC回数はrandread+randwrite各60秒の合計です。</p>
+
+<img class="fig" src="figs/percentiles-randwrite.png" alt="randwrite 40k固定レートのパーセンタイル曲線">
+
+<img class="fig" src="figs/percentiles-randwrite-async.png" alt="同図のsync-naive抜き（非同期構成のみ）">
+
+<p>writeの飽和は45.3kなので40kは88%負荷にあたり、行列待ちが実装差を増幅するぶん、readと同じ序列（naiveが最悪、rawenterが最良）がはっきり現れます。
+序列は逆順でもう1周測り直して再現を確認しました（構成間で入れ替わるのはpoolとpreallocの間の10µs台だけです。例外はasync-naiveのrandreadテールで、GC起因で走行毎に1.5〜2.3msの間を振れます）。
+なおp99.99以上は図表とも載せていません。60秒の測定（240万IO）でも上位240サンプルで決まる統計量になり、反復間で入れ替わって判定できないためです。
+飽和randwriteが全構成45.1〜45.3kにぴったり収束しているのは、デバイス律速の綺麗な証拠です。</p>
+
+<h2>おまけ：1Mシーケンシャルでは結果が変わる</h2>
+
+<p>ここまで4Kランダムだけだったので、1Mシーケンシャル（QD1、O_DIRECT）も見ておきます。</p>
+
+<img class="fig" src="figs/seq-bw.png" alt="1Mシーケンシャル帯域">
+
+<table>
+<tr><th></th><th>seq read</th><th>seq write</th></tr>
+<tr><td>v1 sync-naive</td><td>375MiB/s</td><td>367MiB/s</td></tr>
+<tr><td>v2 async-naive</td><td>362MiB/s</td><td>399MiB/s</td></tr>
+<tr><td>v3 async-pool</td><td>362MiB/s</td><td>385MiB/s</td></tr>
+<tr><td>v4 prealloc</td><td>362MiB/s</td><td>389MiB/s</td></tr>
+<tr><td>v5 rawenter</td><td>369MiB/s</td><td>390MiB/s</td></tr>
+<tr><td>rublk (Rust)</td><td>361MiB/s</td><td>382MiB/s</td></tr>
+<tr><td>生デバイス（参考）</td><td>379MiB/s</td><td>416MiB/s</td></tr>
+</table>
+
+<p>数値は2回測定の平均です。
+結果は「全構成361〜399MiB/sでほぼ同着」でした。
+生デバイスは379/416MiB/sなので、readはデバイス帯域どおり、writeもパス越しの目減りは4〜8%にとどまります。
+S3710（USBブリッジ経由）の帯域律速で、同期のv1すら並びます（QD1シーケンシャルでは同期直列でもデバイスを遊ばせないためです）。
+GCもランタイム固定費もコピー方式も、デバイス帯域が上限を握る土俵では現れません。
+<strong>4Kランダムでは「回数」（syscall、GC、ランタイム固定費）と構造が支配し、シーケンシャル帯域ではバックエンドがすべてを平準化する</strong>。最適化の優先順位は、ワークロード次第で入れ替わります。</p>
+
+<h2>学び</h2>
+
+<ul>
+<li><strong>cgoなしのGoでublkサーバは普通に書ける。</strong> 必要なのは標準ライブラリの<code>syscall</code>とio_uringの最小実装（300行強）だけで、ext4が載る本物のブロックデバイスとして動きます。静的リンクのバイナリ1個をscpするだけで実験が回る身軽さも含めて、この用途にGoは十分に実用的です</li>
+<li><strong>pprofは原因を全部挙げてくる。</strong> アロケーションプロファイルはGC（99.7%が1行のmake）を、CPUプロファイルは同期IO直列（71%がpread待ち）を、それぞれ一発で特定しました。推測でsync.Poolから入っていたら、支配的な方のボトルネックに気づかないままでした</li>
+<li><strong>GCの害は上位テールに出て、負荷が高いほど増幅される。</strong> GC 5719回を5回にすると、p99.9が2311µsから1385µsへ4割縮みました。GCの停止1回は短くても、止まっている間に毎秒4万の要求が行列に積もるからです。実際、GCが残るasync-naiveだけが40kの要求を取りこぼしました（実効39.3k）</li>
+<li><strong>チューニングすればGoはRust実装と同等の性能に迫れる。</strong> IOが支配的なワークロードでは言語の差はそこまで出ず、GCも設計次第で起動回数を実質ゼロにできます。一方でGoは、syscallなどの待ちを見つけるとsysmon（ランタイムの監視スレッド）が介入してくるため、そこがオーバーヘッドになり得ます（本計測では同じ40k IOPSを捌くのにCPUで7.6pt上乗せ。RawSyscallで介入を絶てばrublkと同等の32.9%まで戻ります）。IO待ちが支配する限り差は出ないと思いつつ、ランタイムの介入をケアする必要があるぶん、µs級の処理を書く場合はGoに難しさがある点は否めません</li>
+</ul>
+
+<h2>まとめ</h2>
+
+<p>cgoなしの純GoでublkサーバをつくってS3710上で計測し、素朴な実装からの改善を1段階ずつ確かめました。
+同期直列の非同期化で飽和IOPSは4.3kから52.5kへ、sync.Poolと固定バッファでGCを実質ゼロにしてp99.9は2311µsから1385µsへ、RawSyscallでランタイムの介入を止めてCPUはrublkと同水準の32.9%まで下がりました。
+最終形の性能はRust実装rublkとほぼ並び、飽和スループットの差は2%程度です。</p>
+
+<p>Goなら標準ライブラリだけで書けて、静的リンクのバイナリ1個で動き、pprofとruntime/metricsで挙動を隅まで観測できます。
+レイテンシをµs単位で詰める段階になると、GCとランタイムの介入を設計で避ける工夫（固定バッファ、RawSyscall）が必要になり、そこから先はRustの方が素直です。
+とはいえ、PoCレベルであれば、Goでublkデバイスを実装することも十分に選択肢になるでしょう。</p>
+
+<h2>参考</h2>
+
+<ul>
+<li><a href="https://docs.kernel.org/block/ublk.html">ublk公式ドキュメント</a> / <a href="https://lwn.net/Articles/903855/">LWN: An io_uring-based user-space block driver</a></li>
+<li><a href="https://github.com/torvalds/linux/blob/master/include/uapi/linux/ublk_cmd.h">include/uapi/linux/ublk_cmd.h</a>：結局これが一番正確な仕様書</li>
+<li><a href="https://github.com/torvalds/linux/blob/master/tools/testing/selftests/ublk/kublk.c">tools/testing/selftests/ublk/kublk.c</a>：カーネル付属のミニ実装。制御フローはこれを読むのが早い</li>
+<li><a href="https://github.com/ublk-org/rublk">rublk</a> / <a href="https://github.com/ublk-org/libublk-rs">libublk-rs</a></li>
+<li>先行するGo実装：<a href="https://github.com/ehrlich-b/go-ublk">ehrlich-b/go-ublk</a>、<a href="https://github.com/semistrict/go-ublk">semistrict/go-ublk</a>、e2b-dev/ublk-go（現在は非公開だがmodule proxyから取得可）。いずれも純Goで、設計の答え合わせに大変ありがたかった</li>
+<li><code>go/src/runtime/proc.go</code>：sysmonとretakeの実装。Goのテールレイテンシをµs単位で詰めるなら一読の価値あり</li>
+</ul>
+
+<p>コード全文と計測条件の要約はgoblkリポジトリにあります。</p>
+
+</div>
+<script src="mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad: true, theme: 'dark'});</script>
+</body>
+</html>

@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A ublk Loopback Device in Pure Go: GC Tuning and a Comparison with Rust’s rublk</title>
+<meta name="description" content="Building a userspace block device in Go without cgo, then chasing tail latency: pprof finds two bottlenecks, going async lifts the ceiling 12x, sync.Pool erases the GC tail, and RawSyscall refunds the runtime's fixed costs to match Rust's rublk.">
+<link rel="canonical" href="https://osjupiter.github.io/blog/articles/go-ublk-tail-latency/">
+<link rel="alternate" hreflang="en" href="https://osjupiter.github.io/blog/articles/go-ublk-tail-latency/">
+<link rel="alternate" hreflang="ja" href="https://osjupiter.github.io/blog/articles/go-ublk-tail-latency/index.ja.html">
+<link rel="alternate" hreflang="x-default" href="https://osjupiter.github.io/blog/articles/go-ublk-tail-latency/">
+<meta property="og:site_name" content="osjupiter">
+<meta property="og:title" content="A ublk Loopback Device in Pure Go: GC Tuning and a Comparison with Rust’s rublk">
+<meta property="og:description" content="A userspace block device in Go without cgo: pprof finds two bottlenecks, going async lifts the ceiling 12x, sync.Pool erases the GC tail, and RawSyscall refunds the runtime's fixed costs to match Rust's rublk.">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://osjupiter.github.io/blog/articles/go-ublk-tail-latency/">
+<meta name="twitter:card" content="summary">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "A ublk Loopback Device in Pure Go: GC Tuning and a Comparison with Rust’s rublk",
+  "description": "Building a userspace block device in Go without cgo, then chasing tail latency down to the runtime: GC, sysmon, and a race against Rust's rublk.",
+  "url": "https://osjupiter.github.io/blog/articles/go-ublk-tail-latency/",
+  "datePublished": "2026-07-26",
+  "dateModified": "2026-07-26",
+  "author": {"@type": "Person", "name": "osjupiter", "url": "https://github.com/osjupiter"}
+}
+</script>
+<style>
+:root {
+  --bg: #0c0c0c; --bg2: #151515; --bg3: #1a1a1a;
+  --fg: #d4d4d4; --fg2: #888; --accent: #0af;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; line-height: 1.7; }
+.container { max-width: 860px; margin: 0 auto; padding: 40px 24px; }
+h1 { font-size: 2em; line-height: 1.3; margin-bottom: 8px; color: #fff; }
+.subtitle { color: var(--fg2); font-size: 1.05em; margin-bottom: 40px; }
+h2 { font-size: 1.4em; margin: 48px 0 16px; color: #eee; border-bottom: 1px solid #222; padding-bottom: 8px; }
+h3 { font-size: 1.15em; margin: 32px 0 12px; color: #ccc; }
+h4 { font-size: 1em; margin: 24px 0 8px; color: #bbb; }
+p { margin-bottom: 16px; color: var(--fg); }
+ul, ol { margin: 0 0 16px 24px; }
+li { margin-bottom: 8px; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { background: var(--bg3); padding: 2px 6px; border-radius: 3px; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.9em; color: #ddd; }
+pre { background: var(--bg2); padding: 16px; border-radius: 6px; overflow-x: auto; margin: 16px 0; border: 1px solid #222; }
+pre code { background: none; padding: 0; font-size: 0.85em; line-height: 1.5; }
+table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.9em; }
+th, td { padding: 8px 12px; border: 1px solid #222; text-align: left; }
+th { background: var(--bg2); color: #ccc; font-weight: 600; }
+pre.mermaid { background: none; border: none; display: flex; justify-content: center; }
+img.fig { max-width: 100%; background: #fcfcfb; border-radius: 6px; padding: 8px; margin: 16px 0; display: block; }
+strong { color: #fff; }
+.lang-switch { display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 0.8em; color: #555; margin-bottom: 16px; }
+.lang-switch strong { color: #ccc; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="container">
+<div class="lang-switch"><a href="../../">← index</a><span><strong>EN</strong> · <a href="index.ja.html">日本語</a></span></div>
+
+<h1>A ublk Loopback Device in Pure Go: GC Tuning and a Comparison with Rust’s rublk</h1>
+<p class="subtitle">Building a userspace block device without cgo, then chasing tail latency down through the Go runtime: pprof finds two bottlenecks, going async lifts the ceiling 12x, sync.Pool erases the GC tail, and RawSyscall refunds the runtime's fixed costs to match Rust's rublk.</p>
+
+<p>Linux has <strong>ublk</strong> (kernel 6.0+), a framework for implementing block devices in userspace. Unlike NBD it does not go through a network path: the server talks to the kernel directly over io_uring <code>uring_cmd</code>, which keeps the overhead of the userspace detour small.</p>
+
+<p>This article builds one in <strong>pure Go, no cgo</strong>: a file-backed loopback device (a homemade <code>/dev/loop0</code>) that appears as <code>/dev/ublkbN</code>. Then, measuring tail latency (p90 / p99 / p99.9) with fio at every step:</p>
+
+<ol>
+<li>Write the obvious first implementation, and watch the GC wreck the tail latency.</li>
+<li>Find the causes with <code>pprof</code> and <code>GODEBUG=gctrace=1</code>, then fix them one change at a time: async IO, <code>sync.Pool</code>, fixed buffers.</li>
+<li>Compare against <strong>rublk</strong>, the official Rust implementation from the ublk maintainers, on throughput, tail latency, and CPU.</li>
+<li>Break the CPU gap that still remains down thread by thread, identify the Go runtime's sysmon, and stop its interference with RawSyscall.</li>
+</ol>
+
+<p>Everything below is measured. All experiments ran in a disposable QEMU/KVM VM (Ubuntu 24.04, kernel 6.8); the full code lives in the goblk repository.</p>
+
+<h2>How ublk works</h2>
+
+<p>Three characters appear on stage:</p>
+
+<ul>
+<li><code>/dev/ublk-control</code>: the control character device. Device add, delete, and start commands go here.</li>
+<li><code>/dev/ublkcN</code>: a per-device character device. The data plane (IO request hand-off) lives here.</li>
+<li><code>/dev/ublkbN</code>: the resulting block device. This is what you mkfs and point fio at.</li>
+</ul>
+
+<p>The interesting part is that both control and data go through io_uring's <code>IORING_OP_URING_CMD</code>. Instead of synchronous ioctls, you embed a command struct inside an SQE (submission queue entry), submit it asynchronously, and receive the result as a CQE (completion queue entry).</p>
+
+<pre class="mermaid">
+sequenceDiagram
+    participant App as IO request (app)
+    participant K as kernel (blk-mq / ublk_drv)
+    participant S as ublk server
+    participant B as backend (backing file)
+    S->>K: post FETCH_REQ (tag=0..63) up front
+    App->>K: read(2)
+    K-->>S: CQE (tag=k), desc[k] holds op/sector/len
+    S->>B: pread (read the backing file)
+    B-->>S: data
+    S->>K: COMMIT_AND_FETCH_REQ (result)
+    K-->>App: IO completes
+</pre>
+
+<p>You post <code>FETCH_REQ</code> for every tag up front (queue depth 64 here), then loop: receive a CQE, handle it, post <code>COMMIT_AND_FETCH_REQ</code>. One round trip per IO. The request descriptor (<code>ublksrv_io_desc</code>, 24 bytes: opcode, start sector, length) is read not via a syscall but through shared memory mmapped from <code>/dev/ublkcN</code>.</p>
+
+
+<h2>io_uring without cgo</h2>
+
+<p>Several Go io_uring libraries exist, but ublk only needs <code>SQE128</code> (128-byte SQEs, to make room for the embedded command) and <code>uring_cmd</code>, so I wrote a minimal implementation on the standard library's <code>syscall</code> package alone. Zero dependencies. Three jobs:</p>
+
+<p><strong>1. Create the ring.</strong> Call <code>io_uring_setup(2)</code> (syscall 425 on x86_64) and mmap the returned fd: three regions, the SQ (submission queue) ring, the CQ (completion queue) ring, and the SQE array (recent kernels merge SQ/CQ into a single mmap).</p>
+
+<p><strong>2. Post SQEs.</strong> Write into slot <code>tail &amp; mask</code> of the SQE array and advance the tail atomically. With <code>SQE128</code> each entry is 128 bytes, and the 80 bytes from offset 48 are the <code>cmd</code> area where ublk's command structs (32 bytes for control, 16 for IO) are embedded directly.</p>
+
+<pre><code>type SQE struct {
+	Opcode      uint8
+	Flags       uint8
+	Ioprio      uint16
+	FD          int32
+	Off         uint64 // for uring_cmd this is cmd_op (u32)
+	Addr        uint64
+	Len         uint32
+	OpFlags     uint32
+	UserData    uint64
+	BufIG       uint16
+	Personality uint16
+	SpliceFDIn  int32
+	Cmd         [80]byte // SQE128: offsets 48..127 are the command area
+}</code></pre>
+
+<p><strong>3. Submit and wait.</strong> <code>io_uring_enter(2)</code> (426) with <code>IORING_ENTER_GETEVENTS</code> blocks until completions arrive. Consuming the CQ is just reading 16-byte CQEs while <code>head != tail</code> and advancing the head.</p>
+
+<p>The ring head/tail words are shared with the kernel, so they are accessed through <code>sync/atomic</code> (matching liburing's acquire/release barriers). Roughly 300 lines total. An "io_uring library" is small if you only build what you need.</p>
+
+<h2>Implementing the ublk protocol</h2>
+
+<h3>Control plane</h3>
+
+<p>Device creation is this sequence, all as <code>uring_cmd</code> on <code>/dev/ublk-control</code>:</p>
+
+<ol>
+<li><code>GET_FEATURES</code>: check kernel support flags</li>
+<li><code>ADD_DEV</code>: pass <code>ublksrv_ctrl_dev_info</code> (queue count, depth, max IO size). <code>dev_id = 0xFFFFFFFF</code> means auto-assign.</li>
+<li>Open <code>/dev/ublkcN</code>, mmap the descriptor area</li>
+<li>Each queue posts <code>FETCH_REQ</code> for all its tags</li>
+<li><code>SET_PARAMS</code>: device size, logical block size, and so on</li>
+<li><code>START_DEV</code>: <code>/dev/ublkbN</code> appears here</li>
+</ol>
+
+<p>Since kernel 6.4 the opcodes are ioctl-encoded; <code>ADD_DEV</code> is <code>_IOWR('u', 0x04, struct ublksrv_ctrl_cmd)</code> = <code>0xC0207504</code>.</p>
+
+<h3>Queues bind to OS threads</h3>
+
+<p>There is one ublk-specific constraint: <strong>all IO commands for a queue must come from the OS thread that issued the first one</strong> (the kernel binds the queue to that task and verifies it). Goroutines migrate between OS threads freely, so without care you get <code>EINVAL</code>; the goroutine that owns a queue has to call <code>runtime.LockOSThread</code> first to pin its thread:</p>
+
+<pre><code>func (q *queue) run(ready chan&lt;- error) {
+	runtime.LockOSThread() // ublk binds the queue to the first submitting task
+	...
+}</code></pre>
+
+<h3>The loopback data path, naive version first</h3>
+
+<p>The backend is a file, opened once at startup with a plain <code>open(2)</code> and <code>O_DIRECT</code>; after that everything is fd-based. ublk offers several data-transfer modes; the naive version uses <strong>user-copy mode</strong> (<code>UBLK_F_USER_COPY</code>, kernel 6.4+): no buffer registration, the server moves data itself by preading/pwriting <code>/dev/ublkcN</code> at a special offset. For every request:</p>
+
+<pre><code>buf := make([]byte, n)                      // allocate every time
+switch op {
+case OpRead:
+	preadFull(backingFD, buf, off)          // read from the backing file
+	pwriteFull(cfd, buf, userCopyOff)       // hand to the kernel via ublkcN
+case OpWrite:
+	preadFull(cfd, buf, userCopyOff)        // collect data from the kernel
+	pwriteFull(backingFD, buf, off)         // write to the backing file
+case OpFlush:
+	syscall.Fdatasync(backingFD)
+}</code></pre>
+
+<p>The user-copy pread/pwrite offset encodes queue id and tag as bit fields (<code>0x80000000 + qid&lt;&lt;41 + tag&lt;&lt;25</code>).</p>
+
+<p>"Drop the buffer when done; cleanup is the GC's job." In everyday Go this code is perfectly fine. On a block device data path? Let's find out.</p>
+
+<h2>Measurement conditions (common to everything below)</h2>
+
+<ul>
+<li>VM: QEMU/KVM, 8 vCPU / 4 GiB, Ubuntu 24.04 (kernel 6.8.0-136)</li>
+<li>Backing: LVM thick LVs on an <strong>Intel DC S3710 400GB</strong> (power-loss-protected enterprise SATA, via a USB bridge) on the host, passed into the VM as raw virtio disks with <code>cache=none</code> / <code>aio=native</code>, served directly as block devices (<code>/dev/vdc</code>, <code>/dev/vdd</code>). The host page cache is never involved. 8 GiB each, fully prefilled.</li>
+<li>Raw device baseline (from the guest): 4k randread 217µs / 4.3k IOPS at QD1, ~82k IOPS at QD64; 4k randwrite 45.6k IOPS at QD64. PLP keeps write latency stable.</li>
+<li>Device: 1 queue, depth 64, 512-byte logical blocks (identical for goblk and rublk)</li>
+<li>Server threads pinned to CPUs 0-1 with <code>taskset</code>; fio on CPUs 2-7</li>
+<li>fio: <code>--direct=1</code>, libaio, 3 s ramp. Fixed-rate runs last 60 s, saturation runs 20 s. 4k random: saturation at QD64 (matching queue depth), fixed-rate at QD32. 1M sequential at QD1 (later section).</li>
+<li>Latency comparisons use a <strong>fixed offered rate</strong> (<code>--rate_iops</code>). At saturation, latency is pinned by Little's law to QD divided by throughput, so comparing response distributions requires offering every configuration the same arrival rate.</li>
+<li>The offered rate is <strong>40k IOPS</strong>: 70-90% of the async configurations' saturation (randread 52-59k, randwrite 45.3k), the high-load side where queueing amplifies implementation differences.</li>
+</ul>
+
+<h2>Results first: four stages compared</h2>
+
+<p>The server has four stages, each changing exactly one part of the implementation: v1 sync-naive (<code>make</code> per IO, synchronous backing IO), v2 async-naive (backing IO made asynchronous; allocation identical to v1), v3 async-pool (buffers reused via <code>sync.Pool</code>), and v4 prealloc (fixed per-tag buffers, no allocation at all). The primary metric is <strong>saturated IOPS</strong>: the real SSD backend driven flat-out at QD64. Hitting the same device directly yields about 80k IOPS, so wherever the ublk device falls short of that, the difference is <strong>overhead of the server implementation</strong>, not the device.</p>
+
+<table>
+<tr><th></th><th>change</th><th>saturated randread</th><th>CPU@40k</th><th>GC</th><th>p50</th><th>p90</th><th>p99</th><th>p99.9</th></tr>
+<tr><td>v1 sync-naive</td><td>(baseline)</td><td><strong>4.3k</strong></td><td>12.9%</td><td>711</td><td>7439µs*</td><td>8094µs</td><td>8586µs</td><td>9110µs</td></tr>
+<tr><td>v2 async-naive</td><td>go async</td><td>52.5k</td><td>43.8%</td><td>5719</td><td>701µs</td><td>1004µs</td><td>1516µs</td><td>2311µs</td></tr>
+<tr><td>v3 async-pool</td><td>+ sync.Pool</td><td>56.7k</td><td>39.0%</td><td>5</td><td>644µs</td><td>914µs</td><td>1139µs</td><td>1385µs</td></tr>
+<tr><td>v4 prealloc</td><td>+ fixed buffers</td><td>55.9k</td><td>39.9%</td><td>0</td><td>644µs</td><td>922µs</td><td>1139µs</td><td>1385µs</td></tr>
+<tr><td>raw device (reference)</td><td>no ublk in the path</td><td>82k</td><td>-</td><td>-</td><td>334µs</td><td>465µs</td><td>652µs</td><td>873µs</td></tr>
+</table>
+
+<p>Saturated randread is IOPS at full throttle (QD64); the p50-and-up columns are the randread response distribution at a fixed 40k IOPS over 60 seconds.</p>
+
+<p>* v1 saturates at 4.3k IOPS and cannot serve the offered 40k, so its numbers are queueing delay (explained below).</p>
+
+<img class="fig" src="figs/summary.png" alt="Saturation throughput and CPU">
+
+<img class="fig" src="figs/percentiles-randread.png" alt="Percentile curves, 4k randread at a fixed 40k IOPS">
+
+<img class="fig" src="figs/percentiles-randread-async.png" alt="Same figure without sync-naive (async configurations only)">
+
+<p>sync-naive's queueing values squash the log axis, so a zoomed view with only the async configurations sits alongside.</p>
+
+<p>The figures also include two configurations covered later: v5 (rawenter, a runtime-side optimization) and the Rust implementation rublk. The curves span p50 to p99.9, the range that stays stable across runs (p99.99 and above cannot be resolved even from a 60-second run, so they are omitted). Structure dominates: going async alone lifts the ceiling 12x (4.3k to 52.5k; the synchronous ceiling is 1 divided by the device round trip of 217µs, i.e. the device's own QD1 performance). Removing the GC shows up at the next step, trimming p99.9 by 40%, from 2311µs to 1385µs. Fixed buffers add noise-level gains at this rate.</p>
+
+<h2>v1: measuring the naive implementation</h2>
+
+<p>Saturation throughput (QD64): <strong>4,335 IOPS</strong> randread, which matches the raw device at QD1 (4,328 IOPS) almost exactly. With 64 requests queued but served one at a time, the ceiling pins to 1 divided by the 217µs device round trip. Offer it 40k and it drowns: queueing delay pushes p50 to 7.4ms.</p>
+
+<pre><code>sync-naive:  saturation 4.3k IOPS; at an offered 40k, p50=7439µs (queueing)</code></pre>
+
+<p>Profiling with pprof identifies two causes. The first is the GC. The per-IO <code>make([]byte, 4096)</code> keeps the live heap nearly empty (<code>3->3->0 MB</code>) yet triggers a collection every few tens of milliseconds, and the allocation profile points at that one line:</p>
+
+<pre><code>gc 1593 @101.675s 0%: 0.018+0.18+0.002 ms clock, ..., 3->3->0 MB, 4 MB goal, 2 P
+
+$ go tool pprof -top -sample_index=alloc_space bin/goblk allocs.pb.gz
+    1.28GB 99.68%  ublk.(*queue).handleUserCopy   ← make([]byte, n)</code></pre>
+
+<p>The second is synchronous serialization: the loop preads/pwrites the backing file and blocks in place, so while one IO reads the file, the other 63 wait. The CPU profile agrees, showing 71% of CPU time in that synchronous pread wait.</p>
+
+<pre><code>$ go tool pprof -top bin/goblk cpu.pb.gz
+     4.58s 87.40%  internal/runtime/syscall/linux.Syscall6
+     3.73s 71.18%  (cum) ublk.(*FileBackend).ReadAt   ← blocked in synchronous pread</code></pre>
+
+<p>So v1 has two bottlenecks: the GC (allocation) and synchronous serialization (structure). Advancing with both entangled would make their individual effects unmeasurable, so the structure gets fixed first, and only then does the allocation strategy vary.</p>
+
+<h2>v2: making the backing IO asynchronous</h2>
+
+<p>The structural fix: move backing-file IO onto the same io_uring as the ublk commands, receiving file IO completions as CQEs too, distinguished by the top bit of <code>user_data</code>. Allocation (a <code>make</code> per IO) stays exactly as in v1.</p>
+
+<pre><code>CQE(ublk: request arrives for tag=k)
+  → submit READ/WRITE SQE for the backing file (user_data = tag | 1&lt;&lt;63)
+  → keep processing other tags            ←← the difference from the sync version
+CQE(backing IO done, bit63 set)
+  → COMMIT_AND_FETCH_REQ with its result</code></pre>
+
+<pre><code>async-naive:  p50=701µs  p90=1004µs  p99=1516µs  p99.9=2311µs   5719 GCs
+saturation: randread 52.5k IOPS</code></pre>
+
+<p>The ceiling rises 12x and the offered 40k is now served (at 76% of saturation, the p50 of 701µs includes queueing time). This settles it: synchronous serialization owned the tail and the ceiling. The GC remains, though; with more IOPS served, garbage is produced faster and the GC count actually grows. Its effect shows in a p99.9 of 2311µs, the outlier among the async configurations, and in an effective randread rate of 39.3k — slightly dropping the offered load. The next step removes it.</p>
+
+<h2>v3: sync.Pool</h2>
+
+<p>v1 and v2 allocated the buffer holding each IO's data with <code>make([]byte, n)</code> every time and dropped it afterwards. This step stops that: buffers are borrowed from a <code>sync.Pool</code>, returned after use, and reused. The data hand-off also changes here: instead of the server copying the data via pread/pwrite, buffer addresses are registered with the kernel at FETCH/COMMIT and the kernel does the copying (ublk's default transfer scheme). WRITE payloads are already in the buffer when the CQE arrives, READ payloads are collected at COMMIT, and the data path's only syscall left is io_uring_enter.</p>
+
+<pre><code>q.pool = &amp;sync.Pool{New: func() any {
+	b := make([]byte, maxIOBytes) // allocate at max IO size, reuse
+	return &amp;b
+}}
+bp := q.pool.Get().(*[]byte)
+buf := (*bp)[:n]
+defer q.pool.Put(bp)</code></pre>
+
+<p>Two implementation notes, both general <code>sync.Pool</code> practice. First, store <code>*[]byte</code> rather than <code>[]byte</code>: Pool entries pass through an interface (<code>any</code>), so a non-pointer value gets its slice header copied to the heap (boxed) on every round trip, and the pool meant to remove allocations allocates instead. The <a href="https://pkg.go.dev/sync#Pool">sync.Pool documentation example</a> states that New should return pointer types for exactly this reason. Second, allocate every buffer at the maximum IO size and use only the first n bytes, so all entries carry the same memory cost. Pooling variable-sized buffers lets a small request pin a huge buffer, or hands back one too small for the request (<a href="https://go.dev/issue/23199">golang/go#23199</a>; the standard library's fmt caps the buffers it returns to its pool for the same reason).</p>
+
+<pre><code>async-pool:  p50=644µs  p90=914µs  p99=1139µs  p99.9=1385µs   5 GCs
+saturation: randread 56.7k IOPS</code></pre>
+
+<p>GC count falls from 5719 to 5. p99.9 shrinks by 40%, from 2311µs to 1385µs, and the 40k offered load that v2 was dropping is now served in full. A single GC pause is short, but 40 thousand requests per second pile into the queue while the world is stopped, so the higher the load, the more the GC's damage is amplified. p50 also moves, from 701µs to 644µs, though the transfer-scheme switch made in this step (fewer data-path syscalls) contributes to that; the 40% at the tail is the GC's.</p>
+
+<h2>v4: fixed buffers, no allocation at all</h2>
+
+<p>The last step removes the dynamic buffer management through sync.Pool as well. Queue depth is fixed at 64 and each tag carries one IO at a time, so the required regions are known up front: one per tag, 64 in total. They are allocated at startup with mmap (outside the Go heap, invisible to the GC scanner) and registered with the kernel as fixed per-tag addresses.</p>
+
+<pre><code>prealloc:  p50=644µs  p90=922µs  p99=1139µs  p99.9=1385µs   0 GCs
+saturation: randread 55.9k IOPS</code></pre>
+
+<p>GC hits exactly zero, but both latency and CPU differences from v3 stay within measurement noise — less of a win than hoped. The reason: v3 had already cut the GC to 5 collections per 60 seconds, so there was almost no interference left to remove. The point of this stage is less performance than establishing the zero-allocation data path that the runtime optimization later depends on.</p>
+
+<h3>Watching the GC behave, in graphs</h3>
+
+<p>The four stages ran under the same randread 40k IOPS load for 60 seconds while the runtime's allocation and GC counters were sampled every 25ms.</p>
+
+<img class="fig" src="figs/gc-alloc.png" alt="Cumulative GC cycles and cumulative heap allocations">
+
+<p>Left: async-naive ticks off 2771 GCs in 60 seconds — one every ~22ms — at a steady pace; sync-naive stops at 280 only because its effective 4.3k IOPS produces a tenth of the garbage. Pool and prealloc effectively run none. Right (note the log axis): cumulative allocation is about 9.9 GB for async-naive versus 52 MB for pool and 0.2 MB for prealloc. Pool's 52 MB is inventory for the highest number of buffers ever borrowed at once (a staircase, perfectly flat afterwards; the steady-state slope is zero), which is precisely why the GC stops firing.</p>
+
+<img class="fig" src="figs/heap-sawtooth.png" alt="Live heap sawtooth">
+
+<p>A zoom on the live heap (20-30s). The naive pair keeps carving the sawtooth (allocate, hit the 4 MB heap goal, collect), and each tooth is CPU interference injected into the data path. Pool and prealloc stay flat.</p>
+
+<h4>How to capture this</h4>
+
+<p><code>runtime.ReadMemStats</code> stops the world on every call, contaminating the thing you measure. Go 1.16+'s <code>runtime/metrics</code> reads lock-free, so use that; and since allocating in the writer would fake the "zero" of pool/prealloc, format with <code>strconv.Append*</code> into a fixed buffer:</p>
+
+<pre><code>samples := []metrics.Sample{
+	{Name: "/gc/heap/allocs:bytes"},              // cumulative allocations
+	{Name: "/gc/heap/frees:bytes"},               // cumulative frees
+	{Name: "/memory/classes/heap/objects:bytes"}, // live heap
+	{Name: "/gc/cycles/total:gc-cycles"},         // GC count
+}
+for range time.Tick(25 * time.Millisecond) {
+	metrics.Read(samples) // no stop-the-world
+	buf = strconv.AppendFloat(buf[:0], time.Since(start).Seconds(), 'f', 3, 64)
+	for _, s := range samples {
+		buf = strconv.AppendUint(append(buf, ','), s.Value.Uint64(), 10)
+	}
+	f.Write(append(buf, '\n'))
+}</code></pre>
+
+<p>goblk enables this with <code>-metrics out.csv</code>. Capture and plot:</p>
+
+<pre><code>$ sudo ./goblk -impl naive -backend loop -file /dev/vdc -metrics /tmp/naive.csv &amp;
+$ fio --rate_iops=40000 ... --runtime=60   # apply load
+$ python3 bench/plot_metrics.py            # render PNGs with matplotlib</code></pre>
+
+<p>If you only need GC counts, counting lines of <code>GODEBUG=gctrace=1</code> gives the same number (cross-checked here). gctrace also carries per-GC pause times and the heap goal, so running both is worth it.</p>
+
+<h2>Comparing against the Rust implementation, rublk</h2>
+
+<p>The opponent is <a href="https://github.com/ublk-org/rublk">rublk</a>, the official Rust implementation from ublk-org (the ublk kernel maintainer's org), built on libublk-rs. <code>cargo install rublk</code>, then <code>rublk add loop</code> creates the same kind of loopback device.</p>
+
+<p>To make this a comparison of the languages rather than the setups, the conditions are equalized: 1 queue / depth 64 / 512 KiB max IO / 512-byte logical blocks (all verified identical on both); the backing is the same prefilled 8 GiB S3710 LVs as everything above, with <code>/dev/vdc</code> dedicated to goblk and <code>/dev/vdd</code> to rublk; O_DIRECT on both (rublk defaults to <code>direct_io=1</code>); and all threads are force-pinned to CPUs 0-1 after startup.</p>
+
+<pre><code>saturation (randread):  goblk v4: 55.9k   rublk: 59.3k
+
+40k fixed rate: p50    p90    p99    p99.9   CPU
+goblk v4:      644µs  922µs  1139µs 1385µs  39.9%
+rublk:         619µs  881µs  1090µs 1319µs  32.3%</code></pre>
+
+<p>The latency distributions are near ties from p50 through p99.9, with rublk a few percent ahead across the range. The clear difference is CPU: goblk burns <strong>1.2x</strong>, an extra 7.6 points, for the same 40k IOPS (39.9% vs 32.3%). With zero GCs. Let's chase this difference to the end.</p>
+
+<h2>Breaking the difference down by thread</h2>
+
+<p>Perf tracepoints and per-thread pidstat break the totals down (the deep-dive numbers in this section come from the preliminary file-backend substrate, but the mechanism applies unchanged to the S3710 substrate):</p>
+
+<pre><code>goblk v3 (total 51.7%):                   rublk (total 39.6%):
+  queue loop:      39.5%                    queue thread: 39.6%
+  mystery thread:  10.3%                    (that's all)
+  misc:            ~2.3%
+perf (8s):
+  io_uring_enter  52,215                   (rublk: futex and nanosleep ~0)
+  futex          169,259   ← 21k/s!
+  nanosleep       45,107   ← 5.6k/s</code></pre>
+
+<p>The striking part: <strong>the Go thread that actually serves IO costs the same as Rust's (39.5% vs 39.6%)</strong>. pprof agrees, showing Go user code at measurement-noise level. Per-IO code quality is not where the loss is.</p>
+
+<p>The difference is eaten by two things. First, a thread issuing 5.6 thousand nanosleeps per second: <strong>sysmon</strong>, the Go runtime's watchdog. It retakes Ps from goroutines blocked in syscalls for over 20µs, and under load it repeats this forever at 20µs-to-hundreds-of-µs intervals (<code>runtime/proc.go</code>; the interval starts at 20µs, doubles when idle, caps at 10ms). Second, 21 thousand futexes per second: the synchronization cost of <strong>P hand-off</strong> every time the queue goroutine blocks in a syscall. Both are fixed costs the runtime attaches to a "dedicated thread blocking in syscalls" design. rublk has none of this because Rust has no scheduler that needs to take anything from a blocked thread.</p>
+
+<h3>Keeping sysmon out of the way: RawSyscall</h3>
+
+<p>There is no official switch to stop sysmon. But the source shows it backs off to 10ms on its own when it keeps finding no work (no Ps to retake). So starve it. What tells sysmon about the P is the <code>entersyscall</code>/<code>exitsyscall</code> self-report inside Go's <code>syscall.Syscall6</code>; <code>syscall.RawSyscall6</code> skips that report entirely.</p>
+
+<p>This is normally forbidden. A goroutine blocking in a raw syscall looks "running" to the runtime, yields its P to nobody, and cannot be preempted; in general code this invites scheduler starvation and delayed stop-the-world. goblk gets away with it because the conditions align: the queue goroutine owns a <code>LockOSThread</code> thread (no one else counts on its P) and the data path allocates nothing, so no GC runs. And because an unbounded invisible block could still stall a stop-the-world while idle, raw waits use <code>IORING_ENTER_EXT_ARG</code> with a <strong>50ms timeout</strong>, returning to a safe point at worst every 50ms (the timeout's cost is tens of nanoseconds per wait, under 0.5 CPU points).</p>
+
+<p>This becomes <strong>v5</strong>. Where v2-v4 changed the implementation structure and allocation, v5 is an independent optimization of the runtime's behavior (its precondition is a data path where the GC effectively never runs, so it applies from v3 onward). The effect of <code>-rawenter</code>:</p>
+
+<pre><code>40k fixed rate:  p50    p90    p99    p99.9   CPU     sysmon wakeups
+goblk v4:       644µs  922µs  1139µs 1385µs  39.9%   thousands/s
+goblk v5 (raw): 611µs  889µs  1106µs 1352µs  32.9%   ~100/s
+rublk:          619µs  881µs  1090µs 1319µs  32.3%   -
+
+saturation (randread): goblk v5 58.0k  (rublk: 59.3k)</code></pre>
+
+<p>sysmon backs off to its 10ms floor (~100/s) and becomes harmless; the futexes collapse to 0.3k/s. The process now has the same shape as rublk (one working thread), its CPU lands at 32.9% next to rublk's 32.3%, and the latency distributions overlap. Refunding the Go runtime's fixed costs brings the server level with the Rust implementation.</p>
+
+<h3>sysmon and hand-offs over time</h3>
+
+<p>The figure below runs "30s idle → 30s of 40k IOPS → 30s idle" and counts sysmon wakeups (nanosleep) and P hand-off synchronization (futex; hand-offs themselves are not countable from outside the runtime, so the futex syscalls implementing them serve as the proxy) each second.</p>
+
+<img class="fig" src="figs/sysmon-futex.png" alt="Per-second sysmon wakeups and futex rates, idle-load-idle">
+
+<p>The normal syscall path (no rawenter) wakes sysmon about four thousand times a second the moment load arrives, futexes at 4-8k/s, then detects all-Ps-idle when load stops and puts sysmon into deep sleep (0/s). rawenter stays a flat line through load and idle alike, nanosleep ≈100/s and futex ≈300/s. The "fixed cost" has become genuinely fixed, and you can see it in the shape of the lines.</p>
+
+<p>Captured with perf's interval mode:</p>
+
+<pre><code>$ sudo perf stat -I 1000 -x, \
+    -e syscalls:sys_enter_nanosleep,syscalls:sys_enter_futex \
+    -p $(pgrep -o goblk) -o perf.csv</code></pre>
+
+<p>rawenter has two side effects. At full idle, the normal syscall path is the energy-efficient one (the runtime detects all-Ps-idle and puts sysmon to sleep, while rawenter keeps a 10ms wake-up, worth 0.1-0.3% CPU). And a thread blocked in a raw wait still shows as ordinary <code>S</code> (interruptible sleep) in <code>ps</code>, never <code>D</code>.</p>
+
+<h2>Results overview</h2>
+
+<p>The distribution at a fixed 40k IOPS (4k, 60 seconds) plus saturation throughput. A canary probe preceded every configuration (raw device stable at 80.8-83.6k):</p>
+
+<table>
+<tr><th></th><th>randread p50</th><th>p90</th><th>p99.9</th><th>randwrite p50</th><th>p99.9</th><th>CPU@40k</th><th>GC</th><th>sat randread</th><th>sat randwrite</th></tr>
+<tr><td>v1 sync-naive</td><td>7439µs*</td><td>8094µs</td><td>9110µs</td><td>5211µs*</td><td>7767µs</td><td>12.9%</td><td>711</td><td>4.3k</td><td>6.2k</td></tr>
+<tr><td>v2 async-naive</td><td>701µs</td><td>1004µs</td><td>2311µs</td><td>701µs</td><td>1663µs</td><td>43.8%</td><td>5719</td><td>52.5k</td><td>45.1k</td></tr>
+<tr><td>v3 async-pool</td><td>644µs</td><td>914µs</td><td>1385µs</td><td>693µs</td><td>1582µs</td><td>39.0%</td><td>5</td><td>56.7k</td><td>45.3k</td></tr>
+<tr><td>v4 prealloc</td><td>644µs</td><td>922µs</td><td>1385µs</td><td>701µs</td><td>1598µs</td><td>39.9%</td><td>0</td><td>55.9k</td><td>45.3k</td></tr>
+<tr><td>v5 rawenter</td><td><strong>611µs</strong></td><td>889µs</td><td>1352µs</td><td>693µs</td><td><strong>1500µs</strong></td><td>32.9%</td><td>0</td><td>58.0k</td><td>45.3k</td></tr>
+<tr><td>rublk (Rust)</td><td>619µs</td><td><strong>881µs</strong></td><td><strong>1319µs</strong></td><td>693µs</td><td>1532µs</td><td><strong>32.3%</strong></td><td>0</td><td><strong>59.3k</strong></td><td>45.3k</td></tr>
+<tr><td>raw device (reference)</td><td>334µs</td><td>465µs</td><td>873µs</td><td>545µs</td><td>1205µs</td><td>-</td><td>-</td><td>82k</td><td>45.6k</td></tr>
+</table>
+
+<p>* v1 saturates at 4.3k, so its 40k-rate numbers are queueing delay. GC counts sum the randread and randwrite runs (60 s each).</p>
+
+<img class="fig" src="figs/percentiles-randwrite.png" alt="Percentile curves, 4k randwrite at 40k">
+
+<img class="fig" src="figs/percentiles-randwrite-async.png" alt="Same figure without sync-naive (async configurations only)">
+
+<p>Write saturation is 45.3k, so 40k is an 88% load; queueing amplifies the implementation differences, and the same ordering as randread (naive worst, rawenter best) emerges clearly.
+The ordering was re-measured in reverse configuration order and reproduced (only pool and prealloc swap places, by tens of µs; the one exception is async-naive's randread tail, which swings between 1.5 and 2.3ms across runs because of the GC).
+p99.99 and beyond appear nowhere in the figures or tables: even in a 60-second run (2.4M IOs) they are set by the top ~240 samples and shuffle across repeats. Saturation randwrite converging to 45.1-45.3k across every configuration is the device-bound result in its cleanest form.</p>
+
+<h2>Bonus: the picture flips at 1M sequential</h2>
+
+<p>Everything so far was 4K random, so here is 1M sequential (QD1, O_DIRECT).</p>
+
+<img class="fig" src="figs/seq-bw.png" alt="1M sequential bandwidth">
+
+<table>
+<tr><th></th><th>seq read</th><th>seq write</th></tr>
+<tr><td>v1 sync-naive</td><td>375MiB/s</td><td>367MiB/s</td></tr>
+<tr><td>v2 async-naive</td><td>362MiB/s</td><td>399MiB/s</td></tr>
+<tr><td>v3 async-pool</td><td>362MiB/s</td><td>385MiB/s</td></tr>
+<tr><td>v4 prealloc</td><td>362MiB/s</td><td>389MiB/s</td></tr>
+<tr><td>v5 rawenter</td><td>369MiB/s</td><td>390MiB/s</td></tr>
+<tr><td>rublk (Rust)</td><td>361MiB/s</td><td>382MiB/s</td></tr>
+<tr><td>raw device (reference)</td><td>379MiB/s</td><td>416MiB/s</td></tr>
+</table>
+
+<p>Values are the mean of two runs. The result: every configuration lands at 361-399 MiB/s, a tie. Against the raw device's 379/416 MiB/s, reads run at full device bandwidth and even writes lose only 4-8% through the path. The S3710 over its USB bridge is bandwidth-bound, and even synchronous v1 keeps up (at QD1 sequential, a serial server never leaves the device idle). GC, runtime fixed costs, and copy modes all vanish on a substrate whose ceiling is device bandwidth. <strong>4K random is ruled by per-operation counts and structure; sequential bandwidth is leveled by the backend.</strong> The optimization priority order flips with the workload.</p>
+
+<h2>Lessons</h2>
+
+<ul>
+<li><strong>A ublk server in pure Go, without cgo, is entirely practical.</strong> All it takes is the standard library's <code>syscall</code> package and a minimal io_uring layer (about 300 lines), and the result is a real block device that carries ext4. Add the lightness of scp-ing a single static binary into a VM, and Go is a genuinely workable choice for this kind of code.</li>
+<li><strong>pprof names every cause.</strong> The allocation profile pinned the GC (99.7% from one make) and the CPU profile pinned the synchronous serialization (71% waiting in pread), each in one shot. Starting from a guessed sync.Pool would have left the dominant bottleneck unnoticed.</li>
+<li><strong>GC damage lives in the upper tail, and load amplifies it.</strong> Taking 5719 GCs to 5 cut p99.9 by 40%, from 2311µs to 1385µs. Each pause is short, but 40 thousand requests per second pile into the queue while the world is stopped. Fittingly, the one configuration with a live GC (async-naive) was also the only one that dropped part of the offered 40k (effective 39.3k).</li>
+<li><strong>Tuned Go gets within reach of a Rust implementation.</strong> When IO dominates, the language gap barely shows, and the GC can be designed down to effectively zero collections. Go's remaining overhead is that sysmon (the runtime's watchdog) intervenes whenever it finds a thread waiting in a syscall; that cost the servers an extra 7.6 CPU points for the same 40k IOPS here, and cutting the intervention with RawSyscall brings Go back level with rublk at 32.9%. As long as IO waits dominate, the languages tie, but needing to care about runtime intervention is a real difficulty Go carries for microsecond-scale work.</li>
+</ul>
+
+<h2>Conclusion</h2>
+
+<p>A ublk server in pure Go, no cgo, built up one step at a time and measured on the S3710. Making the synchronous serial loop asynchronous took saturated IOPS from 4.3k to 52.5k; sync.Pool and fixed buffers cut the GC to effectively zero and p99.9 from 2311µs to 1385µs; RawSyscall stopped the runtime's intervention and brought CPU down to 32.9%, level with rublk. The final build performs on par with the Rust implementation, within about 2% of its saturated throughput.</p>
+
+<p>In Go, the standard library suffices, a single static binary runs anywhere, and pprof plus runtime/metrics let you observe every corner of the server's behavior. Once the goal becomes shaving latency at microsecond granularity, you need design work to keep the GC and the runtime's interventions out of the way (fixed buffers, RawSyscall), and beyond that point Rust is the more straightforward tool. Still, at PoC scale, implementing a ublk device in Go is a perfectly reasonable choice.</p>
+
+<h2>References</h2>
+
+<ul>
+<li><a href="https://docs.kernel.org/block/ublk.html">ublk kernel documentation</a> / <a href="https://lwn.net/Articles/903855/">LWN: An io_uring-based user-space block driver</a></li>
+<li><a href="https://github.com/torvalds/linux/blob/master/include/uapi/linux/ublk_cmd.h">include/uapi/linux/ublk_cmd.h</a>: in the end, the most accurate spec</li>
+<li><a href="https://github.com/torvalds/linux/blob/master/tools/testing/selftests/ublk/kublk.c">tools/testing/selftests/ublk/kublk.c</a>: the kernel's own mini implementation; the fastest way to learn the control flow</li>
+<li><a href="https://github.com/ublk-org/rublk">rublk</a> / <a href="https://github.com/ublk-org/libublk-rs">libublk-rs</a></li>
+<li>Prior Go implementations: <a href="https://github.com/ehrlich-b/go-ublk">ehrlich-b/go-ublk</a>, <a href="https://github.com/semistrict/go-ublk">semistrict/go-ublk</a>, e2b-dev/ublk-go (now private but fetchable from the module proxy). All pure Go, and invaluable for checking design decisions.</li>
+<li><code>go/src/runtime/proc.go</code>: the sysmon and retake implementation, worth reading if you chase Go tail latency at the microsecond scale</li>
+</ul>
+
+<p>The full code and a summary of the measurement conditions live in the goblk repository.</p>
+
+</div>
+<script src="mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad: true, theme: 'dark'});</script>
+</body>
+</html>
