@@ -80,7 +80,7 @@ NBDのようにネットワーク越しではなく、io_uringの<code>uring_cmd
 </ol>
 
 <p>以降はすべて実測です。
-検証はすべてQEMU/KVM上の使い捨てVM（Ubuntu 24.04、kernel 6.8）で行い、コード全文はgoblkリポジトリに置いてあります。</p>
+検証はすべてQEMU/KVM上の使い捨てVM（Ubuntu 24.04、kernel 6.8）で行い、コード全文は<a href="https://github.com/osjupiter/goblk">goblkリポジトリ</a>に置いてあります。</p>
 
 <h2>ublkの仕組み</h2>
 
@@ -550,7 +550,7 @@ GCもランタイム固定費もコピー方式も、デバイス帯域が上限
 <li><code>go/src/runtime/proc.go</code>：sysmonとretakeの実装。Goのテールレイテンシをµs単位で詰めるなら一読の価値あり</li>
 </ul>
 
-<p>コード全文と計測条件の要約はgoblkリポジトリにあります。</p>
+<p>コード全文と計測条件の要約は<a href="https://github.com/osjupiter/goblk">goblkリポジトリ</a>にあります。</p>
 
 </div>
 <script src="mermaid.min.js"></script>

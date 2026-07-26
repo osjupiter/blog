@@ -76,7 +76,7 @@ strong { color: #fff; }
 <li>Break the CPU gap that still remains down thread by thread, identify the Go runtime's sysmon, and stop its interference with RawSyscall.</li>
 </ol>
 
-<p>Everything below is measured. All experiments ran in a disposable QEMU/KVM VM (Ubuntu 24.04, kernel 6.8); the full code lives in the goblk repository.</p>
+<p>Everything below is measured. All experiments ran in a disposable QEMU/KVM VM (Ubuntu 24.04, kernel 6.8); the full code lives in the <a href="https://github.com/osjupiter/goblk">goblk repository</a>.</p>
 
 <h2>How ublk works</h2>
 
@@ -459,7 +459,7 @@ p99.99 and beyond appear nowhere in the figures or tables: even in a 60-second r
 <li><code>go/src/runtime/proc.go</code>: the sysmon and retake implementation, worth reading if you chase Go tail latency at the microsecond scale</li>
 </ul>
 
-<p>The full code and a summary of the measurement conditions live in the goblk repository.</p>
+<p>The full code and a summary of the measurement conditions live in the <a href="https://github.com/osjupiter/goblk">goblk repository</a>.</p>
 
 </div>
 <script src="mermaid.min.js"></script>
