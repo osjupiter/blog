@@ -6,6 +6,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  actions: write  # dedup step deletes duplicated github-pages artifacts
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -22,5 +23,18 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: .
+      - name: Dedup pages artifact
+        # The upload API sometimes registers the same artifact multiple times,
+        # and deploy-pages refuses to run when the name is ambiguous.
+        # Keep only the newest "github-pages" artifact of this run.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ids=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
+            --jq '[.artifacts[] | select(.name=="github-pages")] | sort_by(.id) | .[:-1] | .[].id')
+          for id in $ids; do
+            echo "deleting duplicate artifact $id"
+            gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/$id"
+          done
       - id: deployment
         uses: actions/deploy-pages@v4
